@@ -14,22 +14,21 @@ is a harness built on that idea:
 > honest evidence — written up in LaTeX and sketched in Lean. Equations are the
 > *representation* of what happened in the sandbox, not the medium of work.
 
-SimAgent is an **agent harness** in the spirit of
-[pi](https://github.com/earendil-works/pi): a small, correctness-first kernel
-with a strict split — the LLM (or you) reasons; the harness only records what
-it can *execute or check*; the Lean kernel is the sole authority on deduction.
-Three pillars: **Python** computes, **Lean** formulates and verifies, **Manim**
-visualizes. See [ARCHITECTURE.md](ARCHITECTURE.md).
+SimAgent is a small, correctness-first **agent harness**: the LLM (or you)
+reasons; the harness only records what it can *execute or check*; the Lean
+kernel is the sole authority on deduction. Three pillars: **Python** computes,
+**Lean** formulates and verifies, **Manim** visualizes. See
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```mermaid
 flowchart LR
-    A[conjecture\nnatural language] -->|LLM formalizer\nsandbox-vetted| B[ProblemSpec\nJSON + code]
-    B --> C[Sandbox\nPython computation]
-    C --> D[Search\nexhaustive or sampled+annealed]
-    D --> E[Proof kernel\nmethod + verified_by]
-    E -->|generated certificate| L[Lean kernel\ndecide, axiom-free]
-    C --> F[Scenes\nManim + matplotlib + browser]
-    E --> G[Answer\nanswer.md · answer.tex · proof.json · certificate.lean]
+    A["conjecture<br/>natural language"] -->|"LLM formalizer (sandbox-vetted)"| B["ProblemSpec<br/>JSON + code"]
+    B --> C["Sandbox<br/>Python computation"]
+    C --> D["Search<br/>exhaustive or sampled+annealed"]
+    D --> E["Proof kernel<br/>method + verified_by"]
+    E -->|"generated certificate"| L["Lean kernel<br/>decide, axiom-free"]
+    C --> F["Scenes<br/>Manim + matplotlib + browser"]
+    E --> G["Answer<br/>answer.md, answer.tex, proof.json, certificate.lean"]
 ```
 
 ## Proofs, by method
@@ -151,8 +150,7 @@ This is the point of the whole harness: the model is *embodied* in the 3D
 world. Its `look` tool returns the rendered scene as an image (vision), and
 its hands are the same moves a human has — `sample`, `set_var`, `nudge`,
 `check`, `refine`, `hunt`, `exhaust`, `certify`, `submit_lean_proof`,
-`finish`. The loop is a deliberately small manual tool loop (pi-style — we
-own it).
+`finish`. The loop is a deliberately small manual tool loop that we own.
 
 Two backends, same embodied loop and same kernel:
 
@@ -249,16 +247,16 @@ certificates when falsifiable → formal skeletons when not. The interesting
 work is growing the sandbox vocabulary (new domains) and closing the Lean
 loop.
 
+## What's built
+
+- `simagent play` — interactive sandbox REPL with a live-updating 3D preview
+- `simagent web` — browser sandbox: draggable 3D view + in-browser Manim renders
+- `simagent agent` — embodied LLM (vision + tools) on an API key or your `claude` login
+- Proof kernel: ten classical methods, `verified_by` trust ladder
+- Lean integration: generated core-Lean certificates (`decide`, axiom-free) for
+  counterexample / construction / exhaustion; fail-closed checker
+
 ## Roadmap
 
-- [x] `simagent play` — interactive sandbox REPL with live-updating 3D preview
-- [x] `simagent web` — browser sandbox: draggable 3D view + in-browser Manim renders
-- [x] Proof kernel: ten classical methods, `verified_by` trust ladder
-- [x] Lean integration: generated core-Lean certificates (`decide`, axiom-free)
-      for counterexample / construction / exhaustion; fail-closed checker
-- [ ] Lean certificate shapes for more properties (graphs, incidence, convexity)
-- [ ] Mathlib bridge: connect core certificates to Mathlib-flavoured statements
-- [ ] More sandbox domains: graphs, number theory (exact ints), dynamical systems
-- [ ] LLM-proposed *search strategies* (not just specs): custom samplers, symmetry
-      reductions, invariant-guided exploration
-- [ ] Manim narration: animate the search itself (candidates → annealing → witness)
+Planned work is tracked in
+[GitHub issues](https://github.com/Muchmirul/SimAgent/issues).

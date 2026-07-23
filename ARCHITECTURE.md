@@ -1,7 +1,6 @@
 # SimAgent architecture
 
-SimAgent is an **agent harness for 3D math**, built in the spirit of
-[pi](https://github.com/earendil-works/pi): a small kernel with a strict
+SimAgent is an **agent harness for 3D math**: a small kernel with a strict
 responsibility split, where correctness beats features.
 
 ## The responsibility split

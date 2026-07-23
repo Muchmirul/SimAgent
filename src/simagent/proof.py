@@ -1,7 +1,7 @@
 """The proof kernel: what this harness is willing to call a proof.
 
-pi-style responsibility split: the LLM (or the human) reasons; the harness
-only records what it can *execute or check*. Every answer names one of the ten
+Responsibility split: the LLM (or the human) reasons; the harness only records
+what it can *execute or check*. Every answer names one of the ten
 classical proof methods, and carries a `verified_by` stamp that only this
 module assigns:
 
