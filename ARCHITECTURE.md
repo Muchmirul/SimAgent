@@ -120,6 +120,29 @@ The embodiment layer: an LLM runs a tool loop against one `SandboxSession` —
    kernel-checked Lean). The model's `finish` summary is stored as narrative,
    clearly labeled, and never merged into the verdict.
 
+**The mind trace** (`trace.py`). The sandbox is the agent's mind, and the
+trace makes it visible: every tool step appends one JSON object to
+`trace.jsonl` — the model's *thought* (spoken text + raw thinking) that
+preceded the act, the act (tool + args), the full scene graph after it, the
+kernel-side check, the harness's **equation translation** of the new state,
+and a **diff** against the previous step (which rows moved, margin before →
+after). The model thinks in the scene; equations are the harness's
+translation of each mental picture into symbols, not the medium of thought.
+The agent can also *declare* its line of attack (`plan`: one of the ten
+methods + a one-line idea, re-declared on strategy switches). Declarations
+are recorded in the trace as intent and shown as approach cells; the proof's
+`method` is still assigned only by `proof.py` from what was mechanically
+established — the notebook's verdict cell shows both ("declared: X →
+established: Y"), and divergence is information, not error.
+
+The web frontend is a **reasoning notebook** over this trace: the problem is
+the input cell, each step streams in as a cell (thought → act → picture →
+equations → diff), and clicking a cell opens the interactive 3D scene. It
+replays finished runs or follows live ones (`/api/runs`,
+`/api/trace/<run>?after=N`, polled; `/api/agent/start` launches sessions in a
+background thread). A trace is narrative plus reproducible state; it is
+never verdict material — the verdict cell only mirrors `proof.json`.
+
 Two interchangeable backends drive the same `AgentRun` state machine:
 
 - **`api`** — a manual tool loop over the Anthropic SDK (API key or
@@ -147,7 +170,10 @@ src/simagent/
   library/       bundled specs; known-answer tests for the whole machine
   visualize/     mpl.py (always-on PNG), manim_gen.py (generated ThreeDScene)
   agent.py       embodied LLM loop (vision + tools) over one SandboxSession
-  play.py, web/  shells: terminal REPL and browser UI over the same kernel
+  trace.py       the mind trace: thought+act+scene+equation+diff per agent step
+  play.py, web/  shells: terminal REPL and the reasoning-notebook UI over the
+                 same kernel (trace replay/live-follow via /api/runs,
+                 /api/trace; agent sessions via /api/agent/start)
 ```
 
 ## Rules for contributors (human or LLM)

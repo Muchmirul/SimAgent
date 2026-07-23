@@ -7,79 +7,76 @@ cd /mnt/Tforce/dev/SimAgent
 .venv/bin/simagent web
 ```
 
-Your browser opens at **http://127.0.0.1:8642**. (If the port is busy:
-`--port 8700`.)
+Your browser opens the **reasoning notebook** at **http://127.0.0.1:8642**.
+(If the port is busy: `--port 8700`.)
 
-## 2. What you are looking at
+## 2. The idea
 
-- **Left**: the 3D world of one conjecture (a math claim).
-- **Right top**: dropdown to pick a different conjecture.
-- **Colored box**: the current verdict for the shape on screen.
-  - green **PROPERTY HOLDS** — the claim is true for *this* shape
-  - red **PROPERTY FAILS** — the claim is false for *this* shape
-  - **margin** — how strongly (further from 0 = more clearly)
+A coding agent shows its work as diffs. SimAgent shows a *math* agent's work
+as a **visual chain of thought**: the agent lives in a 3D sandbox (its
+"mind"), and the notebook streams that mind step by step. Equations appear in
+every cell, but as *translations* of what the agent is looking at — the
+thinking happens in the scene; the symbols are the record.
 
-The bundled claims all say "for **every** shape ...". So the game is:
-**try to find one shape that makes it FAIL.** One failing shape kills a
-"for every" claim.
+## 3. Run an agent on a bundled problem
 
-## 3. Play by hand
+1. In the **In [ ]:** cell, pick a problem (e.g. *Circumcenter lies inside
+   every tetrahedron*).
+2. Press **Run agent**. (**■ stop** ends the running session — kernel results
+   established so far are kept and the verdict cell still appears; **⟳ restart**
+   stops it and re-runs the same problem in a fresh notebook.)
+3. Cells stream in, one per step of the agent's mind:
+   - **approach** (amber box) — the agent's declared line of attack: one of
+     the ten proof methods plus its idea, re-declared when it switches
+     strategy. This is intent; the end verdict shows *declared vs established*.
+   - **thinking** (dim italic) and **says** — the model's narrative before the act
+   - **act** — the tool it chose: `look()`, `set_var(…)`, `hunt(…)`, `certify()` …
+   - the **picture** — for `look` steps, the exact image the agent saw;
+     otherwise the scene after the act. **Click any picture** to open it as an
+     interactive 3D view (drag to orbit, scroll to zoom, Esc to close).
+   - the **equations** the harness wrote down for that state (amber box)
+   - a **diff** — which points moved (`- before` / `+ after`) and the margin change
+   - a **HOLDS / FAILS** badge with the margin (margin > 0 ⇔ the property holds)
+4. The final **verdict cell** comes only from the kernel (`proof.json`):
+   *method — verified by sandbox+lean* means exact arithmetic plus a Lean
+   kernel certificate. If nothing was certified, it says so — the agent's
+   prose never upgrades a claim.
 
-- **Drag a white dot** with the left mouse button. Everything that depends on
-  it (the sphere, the red center point, the verdict) follows your mouse.
-- Rotate the camera: drag empty space. Zoom: scroll wheel.
+Backends: **auto** uses your Claude API key if one is set, else your `claude`
+login (claude-code). Bundled problems work on either.
 
-## 4. Let the machine play
+## 4. Type your own problem
 
-| Button | What it does |
-|---|---|
-| **Sample** | throw a new random shape on screen |
-| **Hunt** | machine tries ~1500 random shapes, looks for a failing one, and shows it |
-| **Refine** | machine pushes the current shape to make the failure stronger |
-| **Certify** | re-checks the current shape with **exact fractions** (no rounding errors). "CERTIFIED ... FAILS" = a real mathematical disproof, and the log shows the exact coordinates |
+Write it in the text box in plain words, e.g.
 
-## 5. Make a Manim picture or movie
+> the incenter of every triangle lies inside the triangle
 
-In the **Manim** panel:
+and press **Run agent**. The server first *formalizes* it (Claude turns the
+sentence into a spec, validated against the sandbox — this step needs Claude
+API auth), then the agent session starts and the cells stream in as above.
 
-- **Render still** — a picture, ~10 seconds.
-- **Render video** — a rotating 3D movie, ~1–2 minutes.
+## 5. Replay past runs
 
-The result appears right below the buttons. It renders exactly the shape you
-have on screen. Files are also saved under `runs/web/<problem>/media/`.
+The header dropdown lists every recorded run (web-started and CLI-started
+alike). Pick one to re-read the whole notebook; if the run is still going,
+the page follows it live. Deep-link with `?run=<name>`.
 
-## 6. A good 2-minute first session
-
-1. Pick "Circumcenter lies inside every tetrahedron".
-2. Press **Sample** a few times — sometimes green, sometimes red.
-3. Press **Hunt** — it finds a red (failing) shape.
-4. Press **Certify** — read the exact fractions in the log. That claim is now
-   *disproved*, for real.
-5. Press **Render video** — get the movie of your counterexample.
-
-## 7. Without the browser
+## 6. Without the browser
 
 ```bash
 .venv/bin/simagent list                              # see the problems
 .venv/bin/simagent solve circumcenter-in-tetrahedron # full automatic run
-.venv/bin/simagent play circumcenter-in-triangle     # terminal version of play
+.venv/bin/simagent agent circumcenter-in-triangle    # embodied agent in the terminal
+.venv/bin/simagent play circumcenter-in-triangle     # hands-on REPL sandbox
 ```
 
-`solve` writes a folder under `runs/` with: the picture, `answer.md`,
-`answer.tex` (LaTeX), `conjecture.lean` (Lean skeleton), and `report.json`.
+`solve` writes a folder under `runs/` with the picture, `answer.md`,
+`answer.tex`, `conjecture.lean`, and `report.json`. `agent` additionally
+writes `trace.jsonl` — the mind trace the notebook replays. Manim stills and
+videos render via `simagent solve --render-manim` (see README for the no-sudo
+Manim env).
 
-## 8. Your own conjecture (needs a Claude API key)
-
-```bash
-export ANTHROPIC_API_KEY=...   # or: ant auth login
-.venv/bin/simagent formalize "the incenter of every triangle lies inside it"
-.venv/bin/simagent solve --spec incenter-in-triangle.spec.json
-```
-
-`formalize` asks Claude to turn your sentence into a playable spec, and tests
-the generated code against the sandbox before accepting it.
-
-## 9. Reading the verdicts honestly
+## 7. Reading the verdicts honestly
 
 - **CERTIFIED counterexample** — proved false. Done.
 - **numeric candidate** — looks false, but exact check didn't confirm. Not proof.

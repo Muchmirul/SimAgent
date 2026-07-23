@@ -92,6 +92,10 @@ def _cmd_agent(args) -> int:
     print(f"Run dir: {result.out_dir}")
     for name, path in sorted(result.artifacts.items()):
         print(f"  {name:14s} {path}")
+    print(
+        "Replay the mind trace (thought + act + scene + equation per step): "
+        "`simagent web` → Mind panel"
+    )
     return 0
 
 

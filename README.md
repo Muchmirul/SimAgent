@@ -82,28 +82,34 @@ Example verdict from the tetrahedron run — note the witness is *exact*:
 > **DISPROVED — certified counterexample (exact rational arithmetic)**
 > `T = (−1, −7/11, 8/11), (1/5, −1, −1/6), (−1/16, −9/11, 9/16), (−13/14, −4/15, 1/16)`
 
-## The browser sandbox (recommended)
+## The reasoning notebook (recommended)
 
 ```bash
 .venv/bin/simagent web
 ```
 
-Opens `http://127.0.0.1:8642` — a live 3D sandbox in your browser:
+Opens `http://127.0.0.1:8642` — a Jupyter-style notebook whose output is not
+text but the agent's **visual chain of thought**:
 
-- **Drag the vertices** with the mouse; the circumcenter, circumsphere and the
-  HOLDS/FAILS margin follow the pointer in real time (the server re-checks the
-  conjecture on every move — the frontend is just a renderer over the same
-  scene-graph JSON that Manim consumes).
-- **Sample / Hunt / Refine** buttons drive the automated search; a found
-  witness loads straight into the view.
-- **Certify** turns whatever is on screen into an exact-rational verdict.
-- **Manim panel**: render the current configuration as a Manim still or a
-  rotating video, displayed inline when done. The interactive view is
-  three.js (Manim can't render in real time); Manim is the presentation
-  renderer — same scene, cinematic output.
+- **In [ ]:** the problem — pick a bundled conjecture or type one in plain
+  words (free text is formalized by Claude into a sandbox-validated spec).
+- Press **Run agent**: an embodied agent session starts server-side, and one
+  cell streams in per reasoning step — the model's *thinking*, the *act* it
+  chose (`set_var`, `hunt`, `certify`, …), the **picture** of the scene after
+  the act, the harness's **equation translation** of that state, and a
+  **diff** vs the previous step with the margin change.
+- For `look` steps the cell shows the *exact image the agent saw*. Click any
+  cell image to open that step as an **interactive 3D scene** (three.js,
+  orbit/zoom).
+- The final **verdict cell** is built only from kernel artifacts
+  (`proof.json`, `answer.md`) — the model's prose never upgrades a claim.
+- The header dropdown replays any past run (CLI `simagent agent` runs
+  included), and follows a still-running one live.
 
-Pick a problem from the dropdown, or open a formalized spec with
-`simagent web` after `simagent formalize "..."` (load via `/api/load`).
+The server remains the kernel authority: the sandbox session API
+(`/api/load`, `/api/set`, `/api/hunt`, `/api/certify`, …) and Manim render
+jobs are still there for scripts and tests; the notebook is a renderer over
+kernel state.
 
 ### Manim without sudo
 
@@ -148,7 +154,8 @@ exact verdict. `help` lists everything.
 
 This is the point of the whole harness: the model is *embodied* in the 3D
 world. Its `look` tool returns the rendered scene as an image (vision), and
-its hands are the same moves a human has — `sample`, `set_var`, `nudge`,
+its hands are the same moves a human has — `plan` (declare the line of
+attack: method + idea, recorded as intent), `sample`, `set_var`, `nudge`,
 `check`, `refine`, `hunt`, `exhaust`, `certify`, `submit_lean_proof`,
 `finish`. The loop is a deliberately small manual tool loop that we own.
 
@@ -181,6 +188,15 @@ narrative (`agent_summary.md`), but the final verdict is built **only from
 kernel state** — certified reports and kernel-checked Lean — exactly as in
 batch runs. An agent session that certifies a hand-picked counterexample
 produces the same `proof.json` + `certificate.lean` a pipeline run would.
+
+**Watch it think.** Every agent run writes a *mind trace* (`trace.jsonl`):
+per step, the model's thought, the act, the resulting 3D scene, the
+harness's equation translation of that state, and a diff vs the previous
+step. Open `simagent web` and the run appears in the reasoning notebook —
+each step a cell, like a coding agent's diff view, streaming live while the
+agent works. The model thinks in the scene; the equations are the harness
+translating each picture into symbols. Traces are narrative + reproducible
+state, never verdict material.
 
 ## The LLM stages (need Claude API access)
 
@@ -250,7 +266,7 @@ loop.
 ## What's built
 
 - `simagent play` — interactive sandbox REPL with a live-updating 3D preview
-- `simagent web` — browser sandbox: draggable 3D view + in-browser Manim renders
+- `simagent web` — reasoning notebook: problem in, visual chain of thought out (live)
 - `simagent agent` — embodied LLM (vision + tools) on an API key or your `claude` login
 - Proof kernel: ten classical methods, `verified_by` trust ladder
 - Lean integration: generated core-Lean certificates (`decide`, axiom-free) for

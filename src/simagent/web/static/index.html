@@ -3,94 +3,188 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SimAgent sandbox</title>
+<title>SimAgent — reasoning notebook</title>
 <style>
   :root {
     --bg: #0e0e12; --panel: #16161c; --border: #26262e;
     --fg: #e8eaed; --dim: #9aa0a6; --accent: #4a90d9;
     --good: #2ecc71; --bad: #e74c3c; --amber: #f2c14e;
+    --in: #6ab0f3; --out: #e07b53;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
-    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
-  #app { display: flex; height: 100%; }
-  #viewport { flex: 1; position: relative; min-width: 0; }
-  #viewport canvas { display: block; }
-  #labels { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center;
-    color: var(--dim); font-size: 13px; pointer-events: none; text-shadow: 0 1px 3px #000; }
-  #hint { position: absolute; top: 12px; left: 14px; color: var(--dim); font-size: 12px;
-    pointer-events: none; opacity: .8; }
-  #side { width: 360px; background: var(--panel); border-left: 1px solid var(--border);
-    display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow-y: auto; }
-  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  #conjecture { color: var(--dim); font-size: 12.5px; }
-  select, button, input {
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+  .mono { font: 12.5px ui-monospace, Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+
+  header { position: sticky; top: 0; z-index: 5; background: rgba(14,14,18,.92);
+    backdrop-filter: blur(6px); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; padding: 10px 18px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; white-space: nowrap; }
+  header .sub { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  select, button, input, textarea {
     background: #1d1d24; color: var(--fg); border: 1px solid var(--border);
-    border-radius: 6px; padding: 7px 10px; font-size: 13px; }
-  select { width: 100%; }
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; font-family: inherit; }
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   button:disabled { opacity: .45; cursor: wait; }
-  .row { display: flex; gap: 8px; }
-  .row button { flex: 1; }
-  #status { border-radius: 8px; padding: 10px 12px; font-weight: 600; text-align: center;
-    border: 1px solid var(--border); background: #1a1a21; }
-  #status.good { color: var(--good); border-color: #1f5c3a; }
-  #status.bad { color: var(--bad); border-color: #6b2a24; }
-  #status .margin { display: block; font: 12px ui-monospace, Menlo, Consolas, monospace;
-    color: var(--dim); font-weight: 400; margin-top: 2px; }
-  .section { border-top: 1px solid var(--border); padding-top: 10px; }
-  .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
-    color: var(--dim); margin: 0 0 8px; font-weight: 600; }
-  #manimOut { margin-top: 8px; display: none; }
-  #manimOut img, #manimOut video { width: 100%; border-radius: 8px; border: 1px solid var(--border); }
-  #manimMsg { color: var(--dim); font-size: 12px; margin-top: 6px; }
-  #log { background: #101016; border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: #c9cdd3;
-    white-space: pre-wrap; word-break: break-word; max-height: 230px; overflow-y: auto;
-    min-height: 90px; }
-  .num { width: 74px; }
-  label.inline { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  #runSel { max-width: 340px; }
+
+  main { max-width: 880px; margin: 0 auto; padding: 22px 18px 120px; }
+
+  /* notebook cells */
+  .cell { position: relative; margin: 0 0 18px; padding-left: 86px; }
+  .gut { position: absolute; left: 0; top: 2px; width: 74px; text-align: right;
+    font: 12px ui-monospace, Menlo, Consolas, monospace; user-select: none; }
+  .gut.in { color: var(--in); }
+  .gut.out { color: var(--out); }
+
+  /* the input cell */
+  #conjText { width: 100%; min-height: 64px; resize: vertical;
+    font: 14px ui-monospace, Menlo, Consolas, monospace; }
+  .runrow { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  #btnRun { background: #1c2a3a; border-color: #2b4a6b; font-weight: 600; }
+  #runMsg { color: var(--dim); font-size: 12px; }
+  .note { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
+  .num { width: 64px; }
+
+  /* statement cell */
+  #statement { display: none; border-left: 3px solid var(--accent); background: var(--panel);
+    border-radius: 0 8px 8px 0; padding: 12px 14px; }
+  #statement h2 { margin: 0 0 4px; font-size: 16px; }
+  #statement .conj { color: var(--dim); }
+  #statement .latex { margin-top: 8px; color: var(--amber); overflow-x: auto; white-space: pre; }
+
+  /* reasoning cells */
+  .thought { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 13.5px; white-space: pre-wrap; word-break: break-word;
+    max-height: 300px; overflow-y: auto; }
+  .thought .kind { display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .12em; color: var(--accent); margin: 8px 0 2px; }
+  .thought .kind:first-child { margin-top: 0; }
+  .thought .think { color: var(--dim); font-style: italic; }
+  .act { margin-top: 8px; color: var(--in); word-break: break-word; }
+  .act .err { color: var(--bad); font-weight: 600; }
+  .act .badge { color: var(--amber); }
+  .outblock { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .sceneimg { max-width: 100%; border-radius: 8px; border: 1px solid var(--border);
+    cursor: zoom-in; display: block; }
+  .caption { color: var(--dim); font-size: 11.5px; margin-top: -4px; }
+  .eq { background: #101016; border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; color: var(--amber); white-space: pre-wrap; word-break: break-word; }
+  .diffblock { white-space: pre-wrap; word-break: break-word; }
+  .diffblock .add { color: var(--good); }
+  .diffblock .del { color: var(--bad); }
+  .diffblock .chg { color: var(--amber); }
+  .planbox { border-left: 3px solid var(--amber); background: var(--panel);
+    border-radius: 0 8px 8px 0; padding: 10px 12px; margin-top: 8px; }
+  .planbox .pm { font-weight: 650; color: var(--amber); }
+  .planbox .pi { color: var(--dim); font-size: 13px; margin-top: 2px; }
+  .planbox .perr { color: var(--bad); font-size: 12.5px; margin-top: 2px; }
+  .stat { align-self: flex-start; border-radius: 6px; padding: 3px 10px; font-weight: 600;
+    font-size: 12.5px; border: 1px solid var(--border); }
+  .stat.good { color: var(--good); border-color: #1f5c3a; }
+  .stat.bad { color: var(--bad); border-color: #6b2a24; }
+  .stat.dim { color: var(--dim); }
+
+  /* status / verdict cells */
+  .runningcell { color: var(--dim); }
+  .runningcell .logtail { margin-top: 6px; color: #7d838a; font-size: 11.5px;
+    white-space: pre-wrap; word-break: break-word; }
+  @keyframes pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  #verdict { display: none; border-left: 3px solid var(--good); background: var(--panel);
+    border-radius: 0 8px 8px 0; padding: 12px 14px; }
+  #verdict.bad { border-left-color: var(--bad); }
+  #verdict.none { border-left-color: var(--border); }
+  #verdict h2 { margin: 0 0 4px; font-size: 14px; }
+  #verdict .vd { font-weight: 650; }
+  #verdict .meta { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
+
+  /* 3D overlay */
+  #overlay { display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(6,6,9,.94); }
+  #overlay .frame { position: absolute; inset: 28px; border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden; background: var(--bg); }
+  #ovClose { position: absolute; top: 38px; right: 40px; z-index: 51; }
+  #ovCap { position: absolute; left: 0; right: 0; bottom: 38px; text-align: center;
+    color: var(--dim); font-size: 13px; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  #ovHint { position: absolute; top: 38px; left: 44px; color: var(--dim); font-size: 12px;
+    pointer-events: none; }
 </style>
 <script type="importmap">
   { "imports": { "three": "/static/three.module.min.js" } }
 </script>
 </head>
 <body>
-<div id="app">
-  <div id="viewport">
-    <div id="hint">drag the white vertices &middot; orbit with right-drag / scroll</div>
-    <div id="labels"></div>
-  </div>
-  <div id="side">
-    <h1>SimAgent <span style="color:var(--dim);font-weight:400">— conjecture sandbox</span></h1>
-    <select id="problem"></select>
-    <div id="conjecture"></div>
-    <div id="status">loading…</div>
-    <div class="row">
-      <button id="btnSample">Sample</button>
-      <button id="btnRefine">Refine</button>
-    </div>
-    <div class="row">
-      <button id="btnHunt">Hunt</button>
-      <label class="inline">trials <input id="trials" class="num" type="number" value="1500" min="50" step="50"></label>
-    </div>
-    <button id="btnCertify">Certify (exact rationals)</button>
-    <div class="section">
-      <h2>Manim</h2>
-      <div class="row">
-        <button id="btnManimStill">Render still</button>
-        <button id="btnManimVideo">Render video</button>
+<header>
+  <h1>SimAgent</h1>
+  <span class="sub">reasoning notebook — the sandbox is the mind; watch it think</span>
+  <span class="spacer"></span>
+  <select id="runSel"><option value="">open a past run…</option></select>
+  <button id="btnRefresh" title="rescan runs">&#10227;</button>
+</header>
+
+<main>
+  <!-- In[ ]: the problem, as text -->
+  <section class="cell" id="inputCell">
+    <div class="gut in">In&nbsp;[&nbsp;]:</div>
+    <div>
+      <select id="problemSel" style="width:100%"></select>
+      <textarea id="conjText" placeholder="…or type a math problem in plain words (needs Claude API auth for formalization)"></textarea>
+      <div class="runrow">
+        <button id="btnRun">Run agent</button>
+        <button id="btnStop" disabled title="stop the running session (kernel results so far are kept)">■ stop</button>
+        <button id="btnRestart" disabled title="stop, then re-run the same problem in a fresh session">⟳ restart</button>
+        <label class="mono" style="color:var(--dim)">backend
+          <select id="backendSel">
+            <option value="">auto</option>
+            <option value="claude-code">claude-code (login)</option>
+            <option value="api">api (key)</option>
+          </select>
+        </label>
+        <label class="mono" style="color:var(--dim)">max turns
+          <input id="maxTurns" class="num" type="number" value="40" min="1" max="200">
+        </label>
+        <span id="runMsg"></span>
       </div>
-      <div id="manimMsg"></div>
-      <div id="manimOut"></div>
+      <div class="note">The agent lives in a 3D sandbox: it looks at the scene, moves points,
+        hunts, certifies. Each cell below is one step of its mind — thought, act, the picture,
+        the equations (the harness's translation of the picture), and a diff. The verdict comes
+        only from the kernel, never from the prose.</div>
     </div>
-    <div class="section">
-      <h2>Log</h2>
-      <div id="log"></div>
-    </div>
-  </div>
+  </section>
+
+  <!-- the formal statement, once known -->
+  <section class="cell" id="statementWrap" style="display:none">
+    <div class="gut" style="color:var(--dim)">problem</div>
+    <div id="statement"></div>
+  </section>
+
+  <!-- reasoning cells stream in here -->
+  <div id="cells"></div>
+
+  <!-- live status -->
+  <section class="cell" id="statusWrap" style="display:none">
+    <div class="gut in pulse" id="statusGut">&#8230;</div>
+    <div class="runningcell"><span id="statusText"></span><div class="logtail mono" id="logTail"></div></div>
+  </section>
+
+  <!-- kernel verdict -->
+  <section class="cell" id="verdictWrap" style="display:none">
+    <div class="gut out">verdict</div>
+    <div id="verdict"></div>
+  </section>
+</main>
+
+<div id="overlay">
+  <div class="frame" id="ovFrame"></div>
+  <button id="ovClose">close ✕</button>
+  <div id="ovHint">orbit: drag · zoom: scroll</div>
+  <div id="ovCap"></div>
 </div>
+
 <script type="module" src="/static/app.js"></script>
 </body>
 </html>
