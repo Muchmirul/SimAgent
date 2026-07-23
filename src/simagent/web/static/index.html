@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimAgent sandbox</title>
+<style>
+  :root {
+    --bg: #0e0e12; --panel: #16161c; --border: #26262e;
+    --fg: #e8eaed; --dim: #9aa0a6; --accent: #4a90d9;
+    --good: #2ecc71; --bad: #e74c3c; --amber: #f2c14e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #viewport { flex: 1; position: relative; min-width: 0; }
+  #viewport canvas { display: block; }
+  #labels { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center;
+    color: var(--dim); font-size: 13px; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  #hint { position: absolute; top: 12px; left: 14px; color: var(--dim); font-size: 12px;
+    pointer-events: none; opacity: .8; }
+  #side { width: 360px; background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow-y: auto; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  #conjecture { color: var(--dim); font-size: 12.5px; }
+  select, button, input {
+    background: #1d1d24; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px; }
+  select { width: 100%; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: wait; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  #status { border-radius: 8px; padding: 10px 12px; font-weight: 600; text-align: center;
+    border: 1px solid var(--border); background: #1a1a21; }
+  #status.good { color: var(--good); border-color: #1f5c3a; }
+  #status.bad { color: var(--bad); border-color: #6b2a24; }
+  #status .margin { display: block; font: 12px ui-monospace, Menlo, Consolas, monospace;
+    color: var(--dim); font-weight: 400; margin-top: 2px; }
+  .section { border-top: 1px solid var(--border); padding-top: 10px; }
+  .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+    color: var(--dim); margin: 0 0 8px; font-weight: 600; }
+  #manimOut { margin-top: 8px; display: none; }
+  #manimOut img, #manimOut video { width: 100%; border-radius: 8px; border: 1px solid var(--border); }
+  #manimMsg { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  #log { background: #101016; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: #c9cdd3;
+    white-space: pre-wrap; word-break: break-word; max-height: 230px; overflow-y: auto;
+    min-height: 90px; }
+  .num { width: 74px; }
+  label.inline { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "/static/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div id="hint">drag the white vertices &middot; orbit with right-drag / scroll</div>
+    <div id="labels"></div>
+  </div>
+  <div id="side">
+    <h1>SimAgent <span style="color:var(--dim);font-weight:400">— conjecture sandbox</span></h1>
+    <select id="problem"></select>
+    <div id="conjecture"></div>
+    <div id="status">loading…</div>
+    <div class="row">
+      <button id="btnSample">Sample</button>
+      <button id="btnRefine">Refine</button>
+    </div>
+    <div class="row">
+      <button id="btnHunt">Hunt</button>
+      <label class="inline">trials <input id="trials" class="num" type="number" value="1500" min="50" step="50"></label>
+    </div>
+    <button id="btnCertify">Certify (exact rationals)</button>
+    <div class="section">
+      <h2>Manim</h2>
+      <div class="row">
+        <button id="btnManimStill">Render still</button>
+        <button id="btnManimVideo">Render video</button>
+      </div>
+      <div id="manimMsg"></div>
+      <div id="manimOut"></div>
+    </div>
+    <div class="section">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
