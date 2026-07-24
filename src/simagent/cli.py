@@ -54,7 +54,7 @@ def _cmd_solve(args) -> int:
     print(f"\n== {spec.title} ==")
     for line in result.log:
         print(f"  {line}")
-    print(f"\nVerdict: {answer_mod.verdict_text(result.report)}")
+    print(f"\nVerdict: {answer_mod.verdict_text(result.report, result.proof)}")
     print(f"Run dir: {result.out_dir}")
     for name, path in sorted(result.artifacts.items()):
         print(f"  {name:12s} {path}")

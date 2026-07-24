@@ -25,6 +25,7 @@ assistant, so those are Lean-or-nothing here):
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -107,6 +108,110 @@ def _attach_lean(proof: Proof, spec: ProblemSpec, report: SearchReport, out_dir)
     proof.lean_report = result
     if result["ok"] and result["axiom_clean"]:
         proof.verified_by = "sandbox+lean"
+
+
+def _margin_polynomial(spec) -> tuple | None:
+    """The claim's margin as a symbolic polynomial, or None if it is not one.
+
+    Only native `expr` claims with no recipe qualify: a derived entity has no
+    symbolic form here, so its margin cannot be turned into a polynomial.
+    """
+    from .core import expr
+    from .core.space import spaces_for
+
+    measure = getattr(spec, "measure", None)
+    if not isinstance(measure, dict) or measure.get("kind") != "expr":
+        return None
+    if getattr(spec, "recipe", None):
+        return None
+    try:
+        shapes = {n: tuple(s.shape) for n, s in spaces_for(spec).items()}
+        poly = expr.evaluate(expr.parse(measure["margin"]),
+                             expr.symbol_env(shapes), exact=True)
+    except Exception:  # noqa: BLE001 - not a polynomial margin is a normal outcome
+        return None
+    return poly, sorted(poly.free_symbols, key=lambda s: s.name)
+
+
+def _attach_sos_lean(proof: Proof, spec: ProblemSpec, cert: dict, out_dir) -> None:
+    """Generate + kernel-check the sum-of-squares certificate.
+
+    A direct proof is DEDUCTIVE, so the kernel's rule applies with no
+    exception: Lean or nothing. Sympy having expanded the identity is not a
+    verdict on its own.
+    """
+    from .sandbox import leangen
+
+    theorem = re.sub(r"\W+", "_", f"{spec.id}_sos_certificate").strip("_")
+    try:
+        source = leangen.lean_sos(
+            cert["basis"], cert["gram"], cert["squares"],
+            cert["monomials"], cert["coefficients"],
+            theorem=theorem,
+            title=f"Sum-of-squares certificate for: {spec.title}",
+        )
+    except Exception as e:  # noqa: BLE001
+        proof.lean_report = {"available": None, "ok": False,
+                             "error": f"{type(e).__name__}: {e}"}
+        return
+    if out_dir is not None:
+        path = Path(out_dir) / "certificate.lean"
+        path.write_text(source)
+        proof.lean_file = str(path)
+    result = lean_check.check_source(source, workdir=out_dir)
+    proof.lean_report = result
+    if result["ok"] and result["axiom_clean"]:
+        proof.verified_by = "sandbox+lean"
+
+
+def sos_proof(
+    spec: ProblemSpec, report: SearchReport, out_dir=None, spec_trusted: bool = False
+) -> Proof | None:
+    """Prove a universal claim outright with a sum-of-squares certificate.
+
+    This is the harness's only route to PROVING a `forall` over a continuous
+    domain: search can refute one but never establish one. Returns None
+    unless the certificate is strict (p >= eps > 0) AND the Lean kernel
+    accepts it — fail closed at both steps.
+    """
+    from .sandbox import sos
+
+    if getattr(spec, "quantifier", None) != "forall" or report.verdict != "no_counterexample":
+        return None
+    got = _margin_polynomial(spec)
+    if got is None:
+        return None
+    poly, symbols = got
+    hint = None
+    if report.margin_min is not None and report.margin_min > 0:
+        hint = sp.Rational(report.margin_min).limit_denominator(64) / 2
+    try:
+        cert = sos.prove_positive(poly, symbols, eps_hint=hint)
+    except sos.SOSError:
+        return None
+    if cert is None or not cert["strict"]:
+        return None  # eps == 0 proves p >= 0, which does not settle a strict claim
+
+    eps = cert["eps"]
+    proof = Proof(
+        method=Method.DIRECT,
+        claim=spec.latex,
+        verified_by="none",
+        argument=(
+            "The claim's margin is a polynomial, and it was written as a sum of "
+            f"squares with nonnegative rational coefficients after subtracting {eps}: "
+            f"margin - {eps} = sum_i d_i (v_i . z)^2, where z is the vector of "
+            "monomials. Every square is nonnegative at every real point, so the "
+            f"margin is at least {eps} > 0 EVERYWHERE — this is a proof for all "
+            "configurations, not evidence from samples. The identity was expanded "
+            "in exact rational arithmetic and re-checked by the Lean kernel."
+        ),
+        statement_review="bundled-trusted" if spec_trusted else "spec-generated-review-needed",
+    )
+    _attach_sos_lean(proof, spec, cert, out_dir)
+    if proof.verified_by != "sandbox+lean":
+        return None  # deductive means Lean-or-nothing
+    return proof
 
 
 def mechanized_proof(

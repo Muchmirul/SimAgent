@@ -54,6 +54,12 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
   record, `verified_by` ladder (sandbox+lean > sandbox > lean > none). Only
   this module assigns stamps. Mechanized methods: counterexample,
   construction, exhaustion; everything deductive is Lean-or-nothing.
+  `sos_proof()` is the only route to PROVING a `forall` over a continuous
+  domain (search can refute one but never establish one): it certifies the
+  margin as a sum of squares, and being a DIRECT (deductive) method it
+  returns None unless the Lean kernel accepts the certificate. It requires a
+  STRICT certificate (margin >= eps > 0); eps == 0 proves only margin >= 0,
+  which does not settle a strict claim, so it is never upgraded.
 - `src/simagent/lean_check.py` + `sandbox/leangen.py` — generated Lean 4
   *core* certificates (`by decide`, rationals as integer pairs), checked with
   a bare `lean file.lean` (toolchain: `~/.elan/bin/lean`, installed via elan,
@@ -61,13 +67,30 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
 - `src/simagent/core/` contains seven pure atoms: space, entity, op, derive,
   measure, claim, and journal. The eighth atom, view, lives in `views/`.
   `space.py` is the one domain sampler; `claim.py` owns the closed registries
-  and `validate_claim()`, the gate for LLM output.
+  and `validate_claim()`, the gate for LLM output. `expr.py` is the GENERAL
+  vocabulary: one safe arithmetic AST (whitelist, no exec/eval) drives three
+  evaluators — float (search), exact sympy (certify), Lean Q-terms (stamp) —
+  behind the `expr` measure/certifier/Lean hook. Any rational inequality over
+  a box is therefore expressible with no new code and carries no d<=3 cap.
+  Prefer `expr` over adding a problem-specific measure; validate_claim rejects
+  a certifier or Lean hook whose margin is not the measure's margin verbatim.
+  `derive.py` holds the geometry kit; EVERY constructor must carry an `exact`
+  counterpart, because `_exact_recipe_env` replays the recipe in rational
+  arithmetic so a margin may read a derived entity and still certify. Lean
+  takes only FREE variables as atoms: a certificate over a derived value would
+  check a bare number and prove nothing about how it was constructed, so
+  claims with a recipe top out at `sandbox`.
 - `src/simagent/spec.py` is the deprecated legacy compatibility path. It still
   compiles old exec-code disk specs; `ProblemSpec.load` routes native
   `claim/1` JSON to `core.claim`. Bundled and LLM-created problems use Claims.
 - `src/simagent/sandbox/` — `geometry.py` (numeric toolbox: circumcenter,
   barycentric, hulls), `certify.py` (sympy exact mirror + rationalization),
-  `scene.py` (renderer-agnostic scene-graph primitives).
+  `scene.py` (renderer-agnostic scene-graph primitives), `sos.py` (exact
+  rational sum-of-squares search: monomial basis, Gram matrix, symmetric
+  elimination for the PSD split). The SOS search is deliberately INCOMPLETE
+  and says so: it pins the Gram matrix's free parameters at zero instead of
+  solving an SDP, so a failure means "no certificate found", never "none
+  exists".
 - `src/simagent/search.py` — random sampling + margin-guided annealing +
   rationalize-and-certify. **Margin convention: margin > 0 ⇔ property holds**;
   search minimizes it for `forall` (counterexamples), maximizes for `exists`.
@@ -93,8 +116,15 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
   output, model `claude-opus-4-8`, adaptive thinking) with a
   `validate_claim()` repair loop. Its closed-vocabulary prompt is generated
   from registry `doc` strings.
-- `src/simagent/library/` contains five bundled native Claims; the triangle
-  Claim is the LLM few-shot example.
+- `src/simagent/library/` contains eight bundled native Claims; the triangle
+  Claim is the LLM few-shot example. Three are known-answer tests for the
+  general layers: `sum-of-squares-vs-linear` (vocabulary) has margin
+  (x-1)²+(y-1)²-1, so the field view's zero-contour is that unit circle, the
+  algebraic echo of Thales; `orthocenter-in-triangle` (geometry kit) has a
+  margin over a DERIVED entity, which certification reaches only by replaying
+  the recipe exactly; `positive-quadratic` (proving) is the TRUE twin of
+  `sum-of-squares-vs-linear` with one constant changed, proved outright by a
+  Lean-checked sum-of-squares certificate rather than left as evidence.
 
 ## v2 status (P0-P6 landed)
 

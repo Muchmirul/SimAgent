@@ -14,15 +14,21 @@ from . import (
     circumcenter_tetrahedron,
     circumcenter_triangle,
     euler_polyhedron,
+    orthocenter_triangle,
+    positive_quadratic,
     sum_of_odds,
+    sum_of_squares,
 )
 
 _MODULES = [
     circumcenter_triangle,
     circumcenter_tetrahedron,
     circumcenter_4simplex,
+    orthocenter_triangle,
     euler_polyhedron,
     sum_of_odds,
+    sum_of_squares,
+    positive_quadratic,
 ]
 
 REGISTRY: dict[str, Claim] = {m.CLAIM.id: m.CLAIM for m in _MODULES}

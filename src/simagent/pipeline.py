@@ -72,13 +72,22 @@ def run_problem(
     else:
         log.append(f"searching: {trials} trials, seed {seed} ({spec.quantifier})")
         report = run_search(spec, trials=trials, seed=seed)
-    log.append(f"verdict: {answer_mod.verdict_text(report)}")
-
     from . import library
 
     proof = proof_mod.mechanized_proof(
         spec, report, out_dir=out, spec_trusted=library.is_bundled(spec)
     )
+    sos_note = None
+    if proof is None:
+        # search found nothing to refute; try to PROVE the claim outright
+        proof = proof_mod.sos_proof(
+            spec, report, out_dir=out, spec_trusted=library.is_bundled(spec)
+        )
+        if proof is not None:
+            sos_note = "no counterexample exists: sum-of-squares certificate found"
+    log.append(f"verdict: {answer_mod.verdict_text(report, proof)}")
+    if sos_note:
+        log.append(sos_note)
     if proof is not None:
         log.append(
             f"proof: {proof.method.value.replace('_', ' ')} — verified by {proof.verified_by}"

@@ -33,7 +33,12 @@ def render_field(
     if var not in vars:
         raise ValueError(f"unknown variable {var!r}")
     base = np.array(vars[var], dtype=float)
-    if base.ndim != 2:
+    # A lone vector IS one point: slice it directly. That is the natural shape
+    # for an algebraic claim, whose failure region is exactly what this paints.
+    flat = base.ndim == 1
+    if flat:
+        base = base.reshape(1, -1)
+    elif base.ndim != 2:
         raise ValueError("field view needs a point-set variable (use sweep for scalars)")
     m, d = base.shape
     if not (0 <= row < m):
@@ -49,9 +54,10 @@ def render_field(
     evaluated = 0  # valid points that ran, margin or not — for honest diagnostics
     for j, y in enumerate(ys):
         for i, x in enumerate(xs):
-            work[var] = np.array(base)
-            work[var][row, xi] = x
-            work[var][row, yi] = y
+            pt = np.array(base)
+            pt[row, xi] = x
+            pt[row, yi] = y
+            work[var] = pt.reshape(-1) if flat else pt
             try:
                 if not comp.valid(**work):
                     continue
@@ -93,8 +99,9 @@ def render_field(
     # the fixed points of the slice, for orientation
     others = np.delete(np.arange(m), row)
     ax.scatter(base[others, xi], base[others, yi], color="white", s=24, zorder=5)
-    ax.set_xlabel(f"{var}[{row}][{xi}]", color=_style.DIM, fontsize=9)
-    ax.set_ylabel(f"{var}[{row}][{yi}]", color=_style.DIM, fontsize=9)
+    coord = (lambda i: f"{var}[{i}]") if flat else (lambda i: f"{var}[{row}][{i}]")
+    ax.set_xlabel(coord(xi), color=_style.DIM, fontsize=9)
+    ax.set_ylabel(coord(yi), color=_style.DIM, fontsize=9)
     ax.set_aspect("equal")
 
     meta = {

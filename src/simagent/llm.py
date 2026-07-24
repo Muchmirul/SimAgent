@@ -77,8 +77,11 @@ class ClaimModel(BaseModel):
 def _registry_doc(name: str, registry: dict) -> str:
     lines = [f"### {name}"]
     for key, entry in registry.items():
-        params = ", ".join(entry.get("params", ()))
-        lines.append(f"- `{key}`({params}) — {entry['doc']}")
+        if "params" in entry:
+            signature = ", ".join(entry["params"])
+        else:  # constructors declare an arity, not named params
+            signature = f"{entry['arity']} args"
+        lines.append(f"- `{key}`({signature}) — {entry['doc']}")
     return "\n".join(lines)
 
 

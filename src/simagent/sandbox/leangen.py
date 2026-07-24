@@ -137,6 +137,188 @@ def lean_simplex_circumcenter(T: sp.Matrix, theorem: str, title: str) -> str:
     return "\n".join(lines)
 
 
+EXPR_TERM_CAP = 4000  # `decide` evaluates the term in-kernel; keep it tractable
+
+
+def _render_q(term: tuple) -> str:
+    kind = term[0]
+    if kind == "lit":
+        return _q(term[1])
+    if kind == "atom":
+        return term[1]
+    return f"({kind} {_render_q(term[1])} {_render_q(term[2])})"
+
+
+def _term_size(term: tuple) -> int:
+    return 1 if term[0] in ("lit", "atom") else 1 + _term_size(term[1]) + _term_size(term[2])
+
+
+def lean_expr_sign(
+    atoms: dict, term: tuple, theorem: str, title: str, negative: bool
+) -> str:
+    """Certificate: this rational point makes the claim's margin negative (a
+    counterexample) or positive (a witness).
+
+    `atoms`/`term` come from `core.expr.lean_form`, so the Lean term is the
+    same expression the sandbox measured — no second encoding to drift.
+    Unlike the circumcenter certificate this has no determinant blow-up, so
+    it carries no dimension cap.
+    """
+    size = _term_size(term)
+    if size > EXPR_TERM_CAP:
+        raise ValueError(
+            f"Lean term too large ({size} nodes > {EXPR_TERM_CAP}); "
+            "sandbox verdict (exact rational arithmetic) stands"
+        )
+    lines = [PRELUDE, f"/- {title} -/", ""]
+    for name in sorted(atoms):
+        lines.append(f"def {name} : Q := {_q(atoms[name])}")
+    lines += ["", f"def margin : Q := {_render_q(term)}", ""]
+
+    zero = _q(0)
+    conjuncts = [f"qposden {name}" for name in sorted(atoms)]
+    conjuncts.append(f"qlt margin {zero}" if negative else f"qlt {zero} margin")
+    body = " ∧\n    ".join(conjuncts)
+    lines += [
+        f"theorem {theorem} :",
+        f"    {body} := by",
+        "  decide",
+        "",
+        f"#print axioms {theorem}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+SOS_PRELUDE = """\
+/- SimAgent sum-of-squares certificate — Lean 4 core only, checked by `decide`.
+
+   Encoding: (p, q) : Int × Int stands for the rational p/q with q > 0; the
+   theorem asserts q > 0 for every number it uses, and qadd/qmul multiply
+   denominators, so qeqB/qleB (cross-multiplication) coincide with =/<= on ℚ.
+
+   `basis` lists the exponent vectors of the monomial vector z, so z_i is the
+   monomial x^(basis i). The checks below verify, by pure computation:
+     (1) every d_i >= 0,
+     (2) G = sum_i d_i * v_i * v_i^T,
+     (3) every monomial of p has coefficient equal to the matching sum of
+         G entries, i.e. p = z^T G z,
+     (4) every product z_i * z_j is one of p's listed monomials (nothing
+         escapes the comparison), and (5) that monomial list has no repeats.
+   Together: p = z^T G z = sum_i d_i (v_i . z)^2, a sum of squares with
+   nonnegative coefficients, hence p >= 0 at EVERY real point. That closure
+   step is the whole trusted modeling argument; all arithmetic is kernel-checked. -/
+
+abbrev Q := Int × Int
+
+def qadd (a b : Q) : Q := (a.1 * b.2 + b.1 * a.2, a.2 * b.2)
+def qmul (a b : Q) : Q := (a.1 * b.1, a.2 * b.2)
+def qzero : Q := ((0 : Int), 1)
+
+def qeqB (a b : Q) : Bool := a.1 * b.2 == b.1 * a.2
+def qleB (a b : Q) : Bool := decide (a.1 * b.2 <= b.1 * a.2)
+def qposdenB (a : Q) : Bool := decide (0 < a.2)
+
+def expAdd : List Nat -> List Nat -> List Nat
+  | [], b => b
+  | a, [] => a
+  | x :: xs, y :: ys => (x + y) :: expAdd xs ys
+
+def memb (m : List Nat) : List (List Nat) -> Bool
+  | [] => false
+  | x :: xs => (x == m) || memb m xs
+
+def noDup : List (List Nat) -> Bool
+  | [] => true
+  | x :: xs => !(memb x xs) && noDup xs
+
+def sumQ (l : List Q) : Q := l.foldl qadd qzero
+
+def scaleRow (c : Q) (v : List Q) : List Q := v.map (fun x => qmul c x)
+def outer (d : Q) (v : List Q) : List (List Q) := v.map (fun vi => scaleRow (qmul d vi) v)
+def addMat (A B : List (List Q)) : List (List Q) := List.zipWith (List.zipWith qadd) A B
+def matEqB (A B : List (List Q)) : Bool :=
+  (List.zip A B).all (fun p => (List.zip p.1 p.2).all (fun q => qeqB q.1 q.2))
+"""
+
+SOS_BASIS_CAP = 28  # `decide` walks basis^2 products; keep the kernel honest and quick
+
+
+def lean_sos(
+    basis: list[tuple],
+    gram: sp.Matrix,
+    squares: list[tuple],
+    monomials: list[tuple],
+    coefficients: list,
+    theorem: str,
+    title: str,
+) -> str:
+    """Certificate: the margin polynomial is a sum of squares, so it is
+    nonnegative at every real point — a genuine universal proof, not a sample.
+
+    Inputs come from `sandbox.sos`; this module only renders them.
+    """
+    n = len(basis)
+    if n > SOS_BASIS_CAP:
+        raise ValueError(
+            f"sum-of-squares Lean certificate capped at {SOS_BASIS_CAP} basis "
+            f"monomials (got {n}); the sandbox verdict stands"
+        )
+
+    def nat_list(v) -> str:
+        return "[" + ", ".join(str(int(x)) for x in v) + "]"
+
+    def q_list(v) -> str:
+        return "[" + ", ".join(_q(x) for x in v) + "]"
+
+    lines = [SOS_PRELUDE, f"/- {title} -/", ""]
+    lines.append("def basis : List (List Nat) := ["
+                 + ", ".join(nat_list(b) for b in basis) + "]")
+    lines.append("def mons : List (List Nat) := ["
+                 + ", ".join(nat_list(m) for m in monomials) + "]")
+    lines.append("def pcoef : List Q := " + q_list(coefficients))
+    lines.append("def G : List (List Q) := ["
+                 + ", ".join(q_list([gram[i, j] for j in range(n)]) for i in range(n)) + "]")
+    lines.append("def ds : List Q := " + q_list([d for d, _ in squares]))
+    lines.append("def vs : List (List Q) := ["
+                 + ", ".join(q_list(v) for _, v in squares) + "]")
+    lines += [
+        "",
+        "def zeroMat : List (List Q) := List.replicate basis.length "
+        "(List.replicate basis.length qzero)",
+        "def recon : List (List Q) :=",
+        "  (List.zip ds vs).foldl (fun acc p => addMat acc (outer p.1 p.2)) zeroMat",
+        "",
+        "-- coefficient of monomial m in z^T G z",
+        "def gramCoef (m : List Nat) : Q :=",
+        "  sumQ ((List.zip basis G).map (fun r =>",
+        "    sumQ ((List.zip basis r.2).filterMap (fun p =>",
+        "      if expAdd r.1 p.1 = m then some p.2 else none))))",
+        "",
+        "def dimsOk : Bool :=",
+        "  (G.length == basis.length) && G.all (fun r => r.length == basis.length)",
+        "  && (ds.length == vs.length) && vs.all (fun v => v.length == basis.length)",
+        "  && (pcoef.length == mons.length)",
+        "",
+        "def checkAll : Bool :=",
+        "  dimsOk",
+        "  && ds.all (fun d => qposdenB d && qleB qzero d)",
+        "  && G.all (fun r => r.all qposdenB) && vs.all (fun v => v.all qposdenB)",
+        "  && pcoef.all qposdenB",
+        "  && matEqB recon G",
+        "  && (List.zip mons pcoef).all (fun p => qeqB (gramCoef p.1) p.2)",
+        "  && basis.all (fun a => basis.all (fun b => memb (expAdd a b) mons))",
+        "  && noDup mons",
+        "",
+        f"theorem {theorem} : checkAll = true := by",
+        "  decide",
+        "",
+        f"#print axioms {theorem}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def lean_bounded_nat(theorem: str, title: str, defs: str, statement: str) -> str:
     """Certificate for a `decide`-able bounded statement over Nat/Int.
 

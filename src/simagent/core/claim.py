@@ -25,6 +25,7 @@ import numpy as np
 
 from ..sandbox import geometry, leangen, scene
 from ..sandbox import certify as certify_mod
+from . import expr
 from .derive import CONSTRUCTORS
 from .space import Box, IntBox, Space, spaces_for
 
@@ -86,7 +87,21 @@ def _measure_euler_characteristic(env: dict, recipe: list[dict], params: dict) -
                              data={"V": V, "E": E, "F": F, "chi": chi})
 
 
+def _measure_expr(env: dict, recipe: list[dict], params: dict) -> NativeCheckResult:
+    margin = float(expr.evaluate(expr.parse(params["margin"]), env))
+    data = {s["name"]: np.asarray(env[s["name"]], dtype=float).tolist() for s in recipe}
+    return NativeCheckResult(holds=margin > 0, margin=margin, data=data)
+
+
 MEASURES = {
+    "expr": {"fn": _measure_expr, "params": ("margin",),
+             "doc": "margin = a rational arithmetic expression over the free "
+                    "entities and recipe results, written so margin > 0 means "
+                    "the property holds (e.g. for 'lhs >= rhs' write "
+                    "'lhs - rhs'). Operators + - * / and ** with an integer "
+                    "exponent, plus abs/min/max/sum and integer indexing like "
+                    "P[0]; this is THE general measure — prefer it over a "
+                    "problem-specific one"},
     "min_coord": {"fn": _measure_min_coord, "params": ("of",),
                   "doc": "margin = smallest coordinate of a derived vector "
                          "(e.g. barycentric weights: positive iff inside)"},
@@ -119,14 +134,40 @@ CONSTRAINTS = {
 }
 
 
-def _certify_simplex_inside(exact: dict, params: dict) -> bool:
+def _certify_simplex_inside(exact: dict, recipe: list[dict], params: dict) -> bool:
     T = exact[params["of"]]
     c = certify_mod.exact_circumcenter(T)
     w = certify_mod.exact_barycentric(T, c)
     return all(x > 0 for x in w)
 
 
+def _exact_recipe_env(recipe: list[dict], exact_vars: dict) -> dict:
+    """Replay the recipe in exact arithmetic, so a margin may read derived
+    entities (the whole geometry kit) and still be certified.
+
+    Raises if a constructor has no exact counterpart — the run then stays
+    numeric-only rather than certifying a float."""
+    env = expr.exact_env(exact_vars)
+    for step in recipe:
+        spec = CONSTRUCTORS[step["ctor"]]
+        fn = spec.get("exact")
+        if fn is None:
+            raise ValueError(f"constructor {step['ctor']!r} has no exact counterpart")
+        env[step["name"]] = fn(*[env[a] for a in step["args"]])
+    return env
+
+
+def _certify_expr(exact: dict, recipe: list[dict], params: dict) -> bool:
+    """Exact-rational sign of the same margin the sandbox measured, with the
+    recipe replayed in exact arithmetic first."""
+    env = _exact_recipe_env(recipe, exact)
+    return bool(expr.evaluate(expr.parse(params["margin"]), env, exact=True) > 0)
+
+
 CERTIFIERS = {
+    "expr": {"fn": _certify_expr, "params": ("margin",),
+             "doc": "exact-rational evaluation of the measure's margin "
+                    "expression (must repeat it verbatim)"},
     "simplex_circumcenter_inside": {
         "fn": _certify_simplex_inside, "params": ("of",),
         "doc": "exact-rational: circumcenter strictly inside the simplex",
@@ -134,20 +175,35 @@ CERTIFIERS = {
 }
 
 
-def _lean_simplex(exact: dict, params: dict) -> str:
+def _lean_simplex(exact: dict, recipe: list[dict], params: dict) -> str:
     return leangen.lean_simplex_circumcenter(
         exact[params["of"]], theorem=params["theorem"], title=params["title"]
     )
 
 
-def _lean_bounded_nat(exact: dict, params: dict) -> str:
+def _lean_bounded_nat(exact: dict, recipe: list[dict], params: dict) -> str:
     return leangen.lean_bounded_nat(
         theorem=params["theorem"], title=params["title"],
         defs=params["defs"], statement=params["statement"],
     )
 
 
+def _lean_expr(exact: dict, recipe: list[dict], params: dict) -> str:
+    tree = expr.parse(params["margin"])
+    env = _exact_recipe_env(recipe, exact)
+    # only free variables may be Lean atoms: see expr.lean_form
+    atoms, term = expr.lean_form(tree, env, free=set(exact))
+    negative = not bool(expr.evaluate(tree, env, exact=True) > 0)
+    return leangen.lean_expr_sign(
+        atoms, term, theorem=params["theorem"], title=params["title"],
+        negative=negative,
+    )
+
+
 LEANS = {
+    "expr": {"fn": _lean_expr, "params": ("margin", "theorem", "title"),
+             "doc": "kernel-checked sign of the margin expression at an exact "
+                    "rational point (no dimension cap; rejects division)"},
     "simplex_circumcenter": {"fn": _lean_simplex,
                              "params": ("of", "theorem", "title"),
                              "doc": "counterexample certificate (d<=3)"},
@@ -184,7 +240,9 @@ def _scene_simplex(env: dict, params: dict) -> list[dict]:
         prims.append(scene.mesh(P.tolist(), faces, color="#4a90d9", opacity=0.25))
     edges = [(P[i], P[j]) for i in range(m) for j in range(i + 1, m)]
     prims.append(scene.segments(edges, color="#dfe3e8", width=2.0))
-    if not projected:
+    # the sphere is the CIRCUMsphere: only honest when the centre is the
+    # circumcentre, so a claim about another centre turns it off
+    if not projected and params.get("circle", True):
         prims.append(scene.sphere(c3, r, color="#f2c14e", opacity=0.10))
     prims.append(scene.points(P, color="#ffffff", radius=0.05))
     prims.append(scene.points([c3], color="#2ecc71" if inside else "#e74c3c",
@@ -235,7 +293,29 @@ def _scene_gnomon(env: dict, params: dict) -> list[dict]:
     return prims
 
 
+def _scene_point(env: dict, params: dict) -> list[dict]:
+    """The configuration itself, plotted. Generic partner to the `expr`
+    measure: the shape of an algebraic claim lives in the field view, so this
+    only has to show honestly where the current point sits."""
+    A = np.asarray(env[params["of"]], dtype=float)
+    P = np.array([_p3(r) for r in A]) if A.ndim == 2 else np.array([_p3(A)])
+    d = A.shape[-1] if A.ndim >= 1 else 1
+    origin = [0.0] * P.shape[1]
+    prims = [
+        scene.segments([(origin, p) for p in P], color="#dfe3e8", width=1.5),
+        scene.points(P, color="#f2c14e", radius=0.06, name=params["of"]),
+    ]
+    label = "%s = %s" % (params["of"], np.array2string(A, precision=3))
+    if d > 3:
+        label += "  ·  projection ℝ^%d → ℝ³ — trust the numbers over the picture" % d
+    prims.append(scene.label(label))
+    return prims
+
+
 SCENES = {
+    "point": {"fn": _scene_point, "params": ("of",),
+              "doc": "plot a free entity as a point (or points) in space; the "
+                     "general scene for algebraic claims"},
     "simplex": {"fn": _scene_simplex, "params": ("of", "center", "weights"),
                 "doc": "simplex + circumsphere + center; projects when d > 3"},
     "hull3d": {"fn": _scene_hull3d, "params": ("of",), "doc": "3D convex hull mesh"},
@@ -279,13 +359,13 @@ class NativeEngine:
         if self.claim.certify is None:
             raise RuntimeError("claim has no exact certifier")
         c = CERTIFIERS[self.claim.certify["kind"]]
-        return bool(c["fn"](exact, self.claim.certify))
+        return bool(c["fn"](exact, self.claim.recipe, self.claim.certify))
 
     def lean_certificate(self, **exact) -> str:
         if self.claim.lean is None:
             raise RuntimeError("claim has no lean certificate hook")
         entry = LEANS[self.claim.lean["kind"]]
-        return entry["fn"](exact, self.claim.lean)
+        return entry["fn"](exact, self.claim.recipe, self.claim.lean)
 
 
 @dataclass
@@ -438,6 +518,24 @@ def validate_claim(claim: Claim, samples: int = 8, seed: int = 0) -> list[str]:
             if a not in known:
                 errors.append(f"recipe step {step.get('name')!r}: unknown argument {a!r}")
         known.add(step.get("name"))
+    if claim.measure is not None and claim.measure.get("kind") == "expr":
+        try:
+            tree = expr.parse(claim.measure.get("margin"))
+        except expr.ExprError as e:
+            errors.append(f"measure expression rejected: {e}")
+        else:
+            unknown = expr.names(tree) - known
+            if unknown:
+                errors.append(f"measure expression reads unknown entities: {sorted(unknown)}")
+        # Certifying or Lean-stamping a *different* expression than the one
+        # measured would prove nothing about this claim: fail closed.
+        for slot in ("certify", "lean"):
+            block = getattr(claim, slot)
+            if block is not None and block.get("kind") == "expr":
+                if block.get("margin") != claim.measure.get("margin"):
+                    errors.append(
+                        f"{slot} margin must repeat the measure's margin verbatim"
+                    )
     if errors:
         return errors
 

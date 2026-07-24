@@ -94,7 +94,13 @@ def _try_certify(
         return None, None, None, notes
     for max_den in (16, 64, 256, 1024):
         exact = {k: certify_mod.rationalize_array(v, max_den=max_den) for k, v in vars.items()}
-        floats = {k: np.asarray(certify_mod.to_float(e), dtype=float) for k, e in exact.items()}
+        # Snapping must not reshape: rationalize_array widens a 1-D vector to a
+        # (1, n) row matrix for the exact geometry helpers, so restore each
+        # variable's sampled shape before re-running the numeric check.
+        floats = {
+            k: np.asarray(certify_mod.to_float(e), dtype=float).reshape(np.shape(vars[k]))
+            for k, e in exact.items()
+        }
         num = _safe_check(comp, floats)
         if num is None or num.holds != want_holds:
             continue  # snapping crossed the boundary; retry with finer rationals
