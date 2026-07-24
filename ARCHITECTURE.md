@@ -15,7 +15,7 @@ between is dimension-blind.
 
 | primitive | physical analogy | role |
 |---|---|---|
-| **Space** | configuration space | input boundary: `sample / valid / perturb / exact / enumerate`. v1: `Box(ℝᵈ)`, `IntBox(ℤᵈ)` |
+| **Space** | configuration space | input boundary: `sample / valid / perturb / exact / enumerate_cases`. v1: `Box(ℝᵈ)`, `IntBox(ℤᵈ)` |
 | **Entity** | particle | named, stable id; *free* (value in a Space) or *derived* (recipe over entities — coordinates are consequences, the CAD lesson) |
 | **Op** | force | THE only mutation channel (Blender lesson) = the agent's action vocabulary; a closed registry replaces exec'd code |
 | **Derive** | physical law | dependency graph; derived entities recompute when ancestors move |
@@ -26,7 +26,7 @@ between is dimension-blind.
 
 Derivations (features as compositions): sample = Op(Space.sample) · refine =
 loop{perturb → Measure → keep} · hunt = sampleⁿ + refine · exhaust =
-Space.enumerate × Measure · certify = Space.exact + exact Measure · construct
+Space.enumerate_cases × Measure · certify = Space.exact + exact Measure · construct
 = Op(add derived) + Derive · diff = Journal[n] − Journal[n−1] · imagine = Ops
 on a World fork, journaled `mode:"imagine"`, never merged · expect = journal
 annotation scored mechanically on later commits · undo/branch = journal
@@ -124,8 +124,8 @@ domains are rejected; case counting uses Python ints (no `np.prod` overflow).
 ## Data flow
 
 ```
-conjecture ──(llm.formalize, sandbox-validated)──▶ ProblemSpec (JSON + code)
-ProblemSpec ──▶ search: run_exhaustive (finite int domains: EVERY case)
+conjecture ──(llm.formalize, sandbox-validated)──▶ Claim (recipe + registry keys, no exec'd code)
+Claim ──▶ search: run_exhaustive (finite int domains: EVERY case)
                         run_search    (continuous: sample + anneal + certify)
 report ──▶ proof.mechanized_proof ──▶ Proof {method, claim, verified_by}
                     │                        │
@@ -186,15 +186,16 @@ Two interchangeable backends drive the same `AgentRun` state machine:
 
 ```
 src/simagent/
-  core/          THE EIGHT ATOMS (pure: stdlib+numpy+sympy+sandbox leaves only,
-                 enforced by tests/test_layering.py):
+  core/          SEVEN OF THE EIGHT ATOMS (View is the 8th, in views/; pure:
+                 stdlib+numpy+sympy+sandbox leaves only, enforced by
+                 tests/test_layering.py):
                    space.py entity.py op.py derive.py measure.py claim.py
-                   journal.py report.py
+                   journal.py
   views/         the output boundary: identity, field, sweep, ghost, trajectory
                  (one calibrated visual language: diverging colormap centered
                  at margin 0 — blue HOLDS / red FAILS, zero-contour marked)
   search.py      sampled search + annealing (Space.perturb) + exact certify;
-                 exhaustive enumeration (Space.enumerate) — fail-closed
+                 exhaustive enumeration (Space.enumerate_cases) — fail-closed
   proof.py       the proof kernel (methods, Proof, verified_by) — sole verdict authority
   lean_check.py  run Lean core on generated sources; fail-closed acceptance
   sandbox/       geometry.py (numeric, d-generic simplex math + hull_facets),
