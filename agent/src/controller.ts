@@ -406,13 +406,19 @@ export class RunController {
       } else if (source.status === "stopping") {
         await source.settled;
       }
-      const checkpoints = source.runtime
+      const exactCheckpoints = source.runtime
         .getCheckpoints()
-        .filter((checkpoint) => checkpoint.safe && checkpoint.kernelTraceStep <= request.step)
-        .sort((left, right) => right.kernelTraceStep - left.kernelTraceStep);
-      const checkpoint = checkpoints[0];
+        .filter((candidate) => candidate.safe && candidate.kernelTraceStep === request.step);
+      const checkpoint =
+        exactCheckpoints.find((candidate) => {
+          const entry = source.runtime.session.sessionManager.getEntry(candidate.piEntryId);
+          return entry?.type === "message" && entry.message.role === "user";
+        }) ?? exactCheckpoints[0];
       if (!checkpoint) {
-        throw new ControllerError("CONFLICT", `step ${request.step} has no safe pi checkpoint`);
+        throw new ControllerError(
+          "CONFLICT",
+          `step ${request.step} has no exact safe pi checkpoint`,
+        );
       }
       const branchName = this.allocate(`branch-${source.name}-step-${request.step}`);
       const branched = await source.runtime.branch(

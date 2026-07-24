@@ -95,6 +95,16 @@ describe.sequential("P6 run controller", () => {
       expect(comment?.text).toBe("Recheck this exact wide triangle.");
       expect(JSON.stringify(branchContext?.messages)).toContain("Recheck this exact wide triangle.");
       expect(controller.events(branch).events.some((event) => event.type === "branched")).toBe(true);
+
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("finish", { summary: "must not run" }, { id: "inexact-branch-finish" }),
+          { stopReason: "toolUse" },
+        ),
+      ]);
+      await expect(controller.branch(source, { step: 2 })).rejects.toThrow(
+        /no exact safe pi checkpoint/,
+      );
     } finally {
       await controller.shutdown();
       await rm(root, { recursive: true, force: true });

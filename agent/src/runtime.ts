@@ -113,10 +113,10 @@ function deterministicSettings(): SettingsManager {
 /**
  * Pi control plane paired with one Python kernel subprocess.
  *
- * Checkpoints are emitted only at ``turn_end``, after Pi has emitted and
- * persisted every tool result in the assistant's batch. Branching while the
- * session is streaming, from a terminal state, or from an unknown checkpoint
- * is rejected.
+ * Checkpoints are emitted at settled ``turn_end`` boundaries and at a
+ * persisted steering-user boundary after the current tool batch. Branching
+ * while the session is streaming, from a terminal state, or from an unknown
+ * checkpoint is rejected.
  */
 export class SimAgentRuntime {
   readonly session: AgentSession;
@@ -221,8 +221,8 @@ export class SimAgentRuntime {
     };
   }
 
-  private recordCheckpoint(): void {
-    const piEntryId = this.session.sessionManager.getLeafId();
+  private recordCheckpoint(entryId?: string): void {
+    const piEntryId = entryId ?? this.session.sessionManager.getLeafId();
     if (!piEntryId) return;
     const previous = this.checkpoints.at(-1);
     if (
@@ -330,15 +330,36 @@ export class SimAgentRuntime {
     if (!clean) throw new Error("comment text must be non-empty");
     const batch = this.waitForToolBatch();
     const sourceToolCalls = [...this.activeToolCalls];
-    for (const toolCallId of sourceToolCalls) this.steeringSourceToolCalls.add(toolCallId);
-    const queued = this.session.steer(
-      `User comment on ${JSON.stringify(target)}:\n${clean}\nTreat this as steering only; use kernel tools for every conclusion.`,
+    const existingEntries = new Set(
+      this.session.sessionManager.getEntries().map((entry) => entry.id),
     );
+    const steeringText =
+      `User comment on ${JSON.stringify(target)}:\n${clean}\n` +
+      "Treat this as steering only; use kernel tools for every conclusion.";
+    for (const toolCallId of sourceToolCalls) this.steeringSourceToolCalls.add(toolCallId);
+    const queued = this.session.steer(steeringText);
     const boundary = this.steeringBoundary.then(async () => {
       await queued;
       await batch;
       if (this.kernel.tip.finished) throw new Error("the kernel finished before the comment boundary");
       await this.kernel.annotate("user_comment", { text: clean, target });
+      const findSteeringEntry = () =>
+        [...this.session.sessionManager.getBranch()].reverse().find((entry) => {
+          if (existingEntries.has(entry.id) || entry.type !== "message") return false;
+          if (entry.message.role !== "user") return false;
+          const content = entry.message.content;
+          if (typeof content === "string") return content === steeringText;
+          return content.some((block) => block.type === "text" && block.text === steeringText);
+        });
+      let steeringEntry = findSteeringEntry();
+      for (let attempt = 0; steeringEntry === undefined && attempt < 100; attempt += 1) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+        steeringEntry = findSteeringEntry();
+      }
+      if (!steeringEntry) {
+        throw new Error("Pi did not persist the steering user boundary");
+      }
+      this.recordCheckpoint(steeringEntry.id);
     });
     this.steeringBoundary = boundary
       .catch(() => undefined)
@@ -432,8 +453,8 @@ export async function createSimAgentRuntime(
       settingsManager,
     });
 
-    // Pi 0.81.1 defaults to parallel execution. The kernel owns one mutable
-    // world, so force both the global loop and every individual tool to be
+    // Pi defaults to parallel execution. The kernel owns one mutable world,
+    // so force both the global loop and every individual tool to be
     // sequential (the latter is set in createKernelTools()).
     session.agent.toolExecution = "sequential";
 

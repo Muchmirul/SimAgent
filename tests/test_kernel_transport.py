@@ -2,8 +2,10 @@
 import io
 import json
 
+import pytest
+
 from simagent.core.journal import read_trace
-from simagent.kernel_transport import KernelTransport, read_journal, serve
+from simagent.kernel_transport import KernelReplayError, KernelTransport, read_journal, serve
 from simagent.library import get
 
 
@@ -36,6 +38,93 @@ def test_kernel_journal_replays_prefix_exactly(tmp_path):
         assert branch_next["stateHash"] == source_next["stateHash"]
     finally:
         branch.finalize()
+        source.finalize()
+
+
+def test_kernel_hash_covers_constructs_and_pending_expectations(tmp_path):
+    source = KernelTransport(get("circumcenter-in-triangle"), tmp_path / "source-full-state")
+    branch = None
+    try:
+        initial = source.snapshot()
+        constructed = source.call_tool(
+            "construct-center",
+            "construct",
+            {"name": "O", "ctor": "circumcenter", "args": ["T"]},
+        )
+        assert constructed["stateHash"] != initial["stateHash"]
+
+        expected = source.call_tool(
+            "expect-failure",
+            "expect",
+            {"relation": "fails", "note": "the next committed state should fail"},
+        )
+        assert expected["stateHash"] != constructed["stateHash"]
+
+        branch = KernelTransport(
+            get("circumcenter-in-triangle"),
+            tmp_path / "branch-full-state",
+            replay_journal=source.path,
+            replay_through=2,
+        )
+        actual = branch.snapshot()
+        assert actual["state"] == expected["state"]
+        assert actual["stateHash"] == expected["stateHash"]
+    finally:
+        if branch is not None:
+            branch.finalize()
+        source.finalize()
+
+
+def test_replay_rejects_tampered_constructs_and_expectations(tmp_path):
+    source = KernelTransport(get("circumcenter-in-triangle"), tmp_path / "source-tamper")
+    try:
+        source.call_tool(
+            "construct-center",
+            "construct",
+            {"name": "O", "ctor": "circumcenter", "args": ["T"]},
+        )
+        source.call_tool(
+            "expect-low-margin",
+            "expect",
+            {"relation": "<", "value": -0.5, "note": "low"},
+        )
+
+        records = [json.loads(line) for line in source.path.read_text().splitlines()]
+
+        changed_construct = json.loads(json.dumps(records))
+        changed_construct[1]["args"]["name"] = "X"
+        construct_journal = tmp_path / "tampered-construct.jsonl"
+        construct_journal.write_text(
+            "\n".join(json.dumps(record) for record in changed_construct) + "\n"
+        )
+        with pytest.raises(KernelReplayError, match="state diverged"):
+            replay = KernelTransport(
+                get("circumcenter-in-triangle"),
+                tmp_path / "replay-tampered-construct",
+                replay_journal=construct_journal,
+                replay_through=2,
+            )
+            replay.finalize()
+
+        changed_expectation = json.loads(json.dumps(records))
+        changed_expectation[2]["args"] = {
+            "relation": ">",
+            "value": 0.5,
+            "note": "high",
+        }
+        expectation_journal = tmp_path / "tampered-expectation.jsonl"
+        expectation_journal.write_text(
+            "\n".join(json.dumps(record) for record in changed_expectation) + "\n"
+        )
+        with pytest.raises(KernelReplayError, match="state diverged"):
+            replay = KernelTransport(
+                get("circumcenter-in-triangle"),
+                tmp_path / "replay-tampered-expectation",
+                replay_journal=expectation_journal,
+                replay_through=2,
+            )
+            replay.finalize()
+    finally:
         source.finalize()
 
 

@@ -1,10 +1,11 @@
 # SimAgent — notes for Claude
 
-pi-style agent harness for 3D math: a small correctness-first kernel. The LLM
-reasons; the harness only records what it can execute or check; the Lean
-kernel is the sole authority on deduction. Read ARCHITECTURE.md before
-touching the kernel — especially the contributor rules (only proof.py sets
-verified_by; fail closed; every bundled spec is a known-answer test).
+Pi-managed harness for visualization-based, finite-dimensional math: a small
+correctness-first kernel. The LLM reasons; the harness records only what it can
+execute or check; the Lean kernel is the sole authority on deduction. Read
+ARCHITECTURE.md before touching the kernel, especially the contributor rules
+(only proof.py sets verified_by; fail closed; every bundled Claim is a
+known-answer test). Current baseline: v2 P0-P6 landed.
 
 ## Commands
 
@@ -15,24 +16,26 @@ verified_by; fail closed; every bundled spec is a known-answer test).
 .venv/bin/simagent solve <id> [--trials N --seed S --render-manim]
 .venv/bin/simagent solve --conjecture "..."   # needs Claude API auth
 .venv/bin/simagent play <id>                  # interactive REPL; preview.png re-renders per command
-.venv/bin/simagent web                        # reasoning notebook on :8642 (problem in, visual CoT cells out)
-.venv/bin/simagent agent <id>                 # embodied LLM through the pi runtime
+.venv/bin/simagent web                        # reasoning notebook on :8642 (problem in, visual reasoning cells out)
+.venv/bin/simagent agent <id>                 # also accepts --spec FILE or --conjecture "..."
 ```
 
-Agent mode uses the exact-pinned TypeScript pi runtime under `agent/`. Pi owns
-provider auth, model turns, events, steering, and conversation branches. The
-Python `AgentRun` owns only kernel tools and finalization; `look` returns a
-vision image. `kernel_transport.py` is the strict JSONL boundary, and
-`pi_agent.py` is FastAPI's thin service client. Verdicts come only from kernel
-state, never model prose or comments.
+Agent mode uses the TypeScript runtime under `agent/`, with
+`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` exact-pinned at 0.82.0. Pi owns
+provider auth, model turns, events, steering, and conversation sessions. The
+Python `AgentRun` owns kernel-side tools, trace state, proof candidates, and
+finalization; `look` returns a vision image. `kernel_transport.py` is the
+strict JSONL boundary, and `pi_agent.py` is the web app's thin service client.
+Verdicts come only from kernel state, never model prose or comments.
 
-Every run writes `trace.jsonl`: thought, action, scene, equation translation,
-and diff per step. Comments enter pi with `session.steer()` and are journaled
-as `user_comment`; their operation must preserve the full kernel state hash.
-Branches copy a settled pi prefix, replay the matching kernel journal prefix,
+Every pi-managed agent run writes `trace.jsonl` for thought, action, scene, equation, and
+diff cells, plus `kernel-journal.jsonl` for replayable calls and state hashes.
+Comments enter pi with `session.steer()` and are journaled as `user_comment`;
+the annotation must preserve the full kernel state hash. Branches copy a
+settled pi conversation prefix, replay the matching kernel journal prefix,
 verify the exact hash, and add provenance. The notebook supports selecting a
-cell/line or raycast-picking a 3D primitive for comment or branch. Pi events
-are available through `/api/agent/{run}/stream`.
+cell or line, or raycast-picking a 3D primitive, for comment or branch. Pi
+events are available through `/api/agent/{run}/stream`.
 
 Post-audit invariants (do not regress — see test_hardening.py): lean_check
 binds axiom-freedom to printed theorem NAMES and rejects sorry/admit/
@@ -55,11 +58,13 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
   *core* certificates (`by decide`, rationals as integer pairs), checked with
   a bare `lean file.lean` (toolchain: `~/.elan/bin/lean`, installed via elan,
   no sudo, no Mathlib). Checker is fail-closed incl. `#print axioms` clean.
-- `src/simagent/core/` — THE EIGHT ATOMS (see v2 section above). `space.py`
-  is the ONE domain sampler now; `claim.py` holds the registries and
-  `validate_claim()` (the gate for LLM output).
-- `src/simagent/spec.py` — LEGACY exec'd-code contract, deprecated: loader
-  shim only (`ProblemSpec.load` routes claim/1 JSON to core.claim).
+- `src/simagent/core/` contains seven pure atoms: space, entity, op, derive,
+  measure, claim, and journal. The eighth atom, view, lives in `views/`.
+  `space.py` is the one domain sampler; `claim.py` owns the closed registries
+  and `validate_claim()`, the gate for LLM output.
+- `src/simagent/spec.py` is the deprecated legacy compatibility path. It still
+  compiles old exec-code disk specs; `ProblemSpec.load` routes native
+  `claim/1` JSON to `core.claim`. Bundled and LLM-created problems use Claims.
 - `src/simagent/sandbox/` — `geometry.py` (numeric toolbox: circumcenter,
   barycentric, hulls), `certify.py` (sympy exact mirror + rationalization),
   `scene.py` (renderer-agnostic scene-graph primitives).
@@ -74,8 +79,8 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
 - `src/simagent/web/` — notebook UI + kernel API. `session.py`
   (SandboxSession: server-authoritative state), `app.py` (FastAPI:
   load/set/sample/refine/hunt/certify + Manim jobs + trace endpoints
-  (/api/runs, /api/trace/{run} incl. per-step mpl renders) + thin pi control
-  routes (/api/agent/start/status/stop/comment/branch/stream)), `static/`
+  (`/api/runs`, `/api/trace/{run}`, and per-step mpl renders) + pi control
+  routes for models/start/status/events/stop/comment/branch/stream), `static/`
   (index.html + app.js = the reasoning notebook: cells stream the mind trace;
   cell images click through to an interactive three.js overlay;
   three.module.min.js and OrbitControls.js are vendored — keep them). The
@@ -84,43 +89,46 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
 - `src/simagent/answer.py` — answer.md / answer.tex / conjecture.lean. Verdict
   wording is deliberate: certified vs numeric-candidate vs evidence. Never
   upgrade the claim.
-- `src/simagent/llm.py` — Claude formalizer (`messages.parse` structured
-  output, model `claude-opus-4-8`, adaptive thinking) with sandbox-validation
-  repair loop. Keep the system prompt's toolbox reference in sync with
-  `spec.toolbox()`.
-- `src/simagent/library/` — bundled specs; the triangle spec doubles as the
-  LLM few-shot example.
+- `src/simagent/llm.py` is the Claude formalizer (`messages.parse` structured
+  output, model `claude-opus-4-8`, adaptive thinking) with a
+  `validate_claim()` repair loop. Its closed-vocabulary prompt is generated
+  from registry `doc` strings.
+- `src/simagent/library/` contains five bundled native Claims; the triangle
+  Claim is the LLM few-shot example.
 
-## v2 core (P0–P6 landed)
+## v2 status (P0-P6 landed)
 
-- `src/simagent/core/` = seven of the eight atoms (space/entity/op/derive/
-  measure/claim/journal) — pure layer, enforced by tests/test_layering.py.
-  The eighth atom, view, is the output boundary and lives in `views/` (it is
-  dimension-aware, so deliberately outside the pure core).
-  Dimension enters ONLY at Space (in) and View / `views/` (out).
+- `src/simagent/core/` is the seven-atom pure layer, enforced by
+  `tests/test_layering.py`; `views/` contains the eighth atom and analytical
+  output views. Dimension is declared by each Space. Views and registered
+  scene builders render that state; simplex scenes above d=3 explicitly
+  project to the first three coordinates and label the projection.
 - Bundled library = NATIVE CLAIMS (zero exec'd code): recipe + registry keys
   (MEASURES/CONSTRAINTS/CERTIFIERS/LEANS/SCENES in core/claim.py,
   CONSTRUCTORS in core/derive.py). spec.py is the deprecated legacy loader.
 - circumcenter-in-4simplex (ℝ⁴) is the dimension-agnostic known-answer test:
   certified counterexample, verified_by="sandbox", explicit no-Lean-above-d3
   notice (leangen raises "capped at d<=3"; answer.py prints the notice).
-- Agent tools now also: measure (qualitative), view (field/sweep/trajectory),
-  imagine (fork, mode="imagine" journal entries, kernel ops rejected),
-  construct (derived entities render + follow ancestors), expect (scored
-  mechanically on later commits).
-- `kernel_transport.py` is the provider-free JSONL kernel boundary;
-  `agent/` is the pinned pi runtime and session service. Product turns accept
-  one kernel action, making tool cells settled branch points.
+- Closed agent tools are plan, look, sample, set_var, nudge, check, measure,
+  view, imagine, refine, hunt, exhaust, certify, submit_lean_proof, construct,
+  expect, and finish. TypeScript checks its schemas against Python and exposes
+  no pi coding tools or discovered resources.
+- `kernel_transport.py` is the provider-free JSONL kernel boundary; `agent/`
+  is the exact-pinned pi runtime and session service. Product turns accept one
+  kernel action, making tool cells settled branch points.
+- P7 multi-agent lanes, adopt, and merge remain roadmap work. The current pi
+  service permits one active controlled run at a time.
 
 ## Conventions
 
 - Tests must stay offline (no API calls, no manim requirement).
-- New capability = new registry entry (measure/constructor/certifier/lean/
-  scene) — registered in core AND described in llm.py's system prompt (it is
-  generated from the registries, so extend the registry `doc` strings).
+- New formalization vocabulary means a registry entry for a measure,
+  constraint, constructor, certifier, Lean hook, or scene. Give it an accurate
+  `doc` string because `llm.py` generates the model's menu from those docs.
 - Lean toolchain IS installed (~/.elan, Lean 4.32.1); generated certificates
   are kernel-checked. Lean *skeletons* (conjecture.lean) remain UNCHECKED.
-- Only proof.py stamps verified_by; views/measures/journal never decide.
+- Only `proof.py` stamps `verified_by`; views, measures, journals, and UI code
+  never mint proof verdicts.
 - for every code change, report before → after → impact on the project goal
   and its users.
 
@@ -133,7 +141,7 @@ this instruction is the guideline development of this simAgent project
 
 Follow system, developer, safety, and tool rules first. Then follow this file and the user's current request.
 
-this project are work under the primitives.
+This project is built around the eight atoms described above.
 
 ## Communication
 

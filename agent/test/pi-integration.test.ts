@@ -109,7 +109,7 @@ function toolResults(context: Context) {
   return context.messages.filter((message) => message.role === "toolResult");
 }
 
-describe.sequential("Pi 0.81.1 SimAgent integration", () => {
+describe.sequential("Pi 0.82.0 SimAgent integration", () => {
   it("registers only explicit kernel tools with no discovered resources or active built-ins", async () => {
     const item = await harness();
     try {
@@ -238,25 +238,28 @@ describe.sequential("Pi 0.81.1 SimAgent integration", () => {
     }
   });
 
-  it("journals model narrative and delivers a targeted comment as steering", async () => {
+  it("journals targeted steering and branches from the exact comment boundary", async () => {
     let continuation: Context | undefined;
-    const item = await harness([
-      fauxAssistantMessage(
-        [
-          fauxText("I will inspect the current margin."),
-          fauxToolCall(
-            "set_var",
-            { name: "T", values: [-1, 0, 1, 0, 0, 0.2] },
-            { id: "call-comment-target" },
-          ),
-        ],
-        { stopReason: "toolUse" },
-      ),
-      (context) => {
-        continuation = JSON.parse(JSON.stringify(context)) as Context;
-        return fauxAssistantMessage(fauxText("I will follow the user's equation hint."));
-      },
-    ]);
+    const item = await harness(
+      [
+        fauxAssistantMessage(
+          [
+            fauxText("I will inspect the current margin."),
+            fauxToolCall(
+              "set_var",
+              { name: "T", values: [-1, 0, 1, 0, 0, 0.2] },
+              { id: "call-comment-target" },
+            ),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        (context) => {
+          continuation = JSON.parse(JSON.stringify(context)) as Context;
+          return fauxAssistantMessage(fauxText("I will follow the user's equation hint."));
+        },
+      ],
+      { persistent: true },
+    );
     let signalStarted!: () => void;
     const started = new Promise<void>((resolveStarted) => {
       signalStarted = resolveStarted;
@@ -266,6 +269,7 @@ describe.sequential("Pi 0.81.1 SimAgent integration", () => {
         signalStarted();
       }
     });
+    let branched: SimAgentRuntime | undefined;
     let disposed = false;
     try {
       const prompting = item.runtime.promptTask();
@@ -276,6 +280,36 @@ describe.sequential("Pi 0.81.1 SimAgent integration", () => {
         index: 0,
       });
       await prompting;
+
+      const commentCheckpoint = item.runtime
+        .getCheckpoints()
+        .find((checkpoint) => {
+          if (checkpoint.kernelTraceStep !== 2) return false;
+          const entry = item.runtime.session.sessionManager.getEntry(checkpoint.piEntryId);
+          return entry?.type === "message" && entry.message.role === "user";
+        });
+      if (!commentCheckpoint) throw new Error("comment boundary checkpoint missing");
+      const commentEntry = item.runtime.session.sessionManager.getEntry(commentCheckpoint.piEntryId);
+      expect(commentEntry?.type).toBe("message");
+      if (commentEntry?.type === "message") {
+        expect(commentEntry.message.role).toBe("user");
+        expect(JSON.stringify(commentEntry.message.content)).toContain("Check the sign on this line.");
+      }
+
+      branched = await item.runtime.branch(
+        commentCheckpoint,
+        join(item.root, "branched-from-comment"),
+      );
+      expect((await branched.kernel.snapshot()).traceStep).toBe(2);
+      expect(JSON.stringify(branched.session.sessionManager.getEntries())).toContain(
+        "Check the sign on this line.",
+      );
+      expect((await journalTrace(branched)).find((step) => step.kind === "user_comment")?.text).toBe(
+        "Check the sign on this line.",
+      );
+      await branched.dispose();
+      branched = undefined;
+
       await item.runtime.dispose();
       disposed = true;
       const messages = continuation?.messages ?? [];
@@ -295,6 +329,7 @@ describe.sequential("Pi 0.81.1 SimAgent integration", () => {
       );
       expect(steps.at(-1)?.thought?.[0]?.text).toContain("follow the user's equation hint");
     } finally {
+      if (branched?.session.isIdle) await branched.dispose().catch(() => undefined);
       await cleanup(item, disposed);
     }
   });

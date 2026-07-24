@@ -88,20 +88,56 @@ def _proof_state(run: AgentRun) -> dict[str, Any] | None:
 
 
 def _state(run: AgentRun) -> dict[str, Any]:
-    """Replay-relevant state; no presentation artifact can affect its hash."""
+    """Canonical executable state used to verify exact journal replay.
+
+    Narrative trace contents are deliberately outside this hash, but every
+    value that can affect later world operations, proof results, or mechanical
+    expectation scoring belongs here. In particular, free coordinates alone
+    are insufficient: constructed entities and pending expectations must also
+    survive and verify across a branch.
+    """
+    world = run.session.world
+    entities = []
+    for entity in world.entities.values():
+        item: dict[str, Any] = {"name": entity.name, "kind": entity.kind}
+        if entity.kind == "free":
+            space = entity.space
+            item["space"] = {
+                "type": type(space).__name__,
+                "shape": list(space.shape),
+                "low": space.low,
+                "high": space.high,
+            }
+        else:
+            item.update({"ctor": entity.ctor, "args": list(entity.args)})
+        entities.append(item)
+
     report = run.best_report()
     return _jsonable(
         {
+            "spec": run.spec.to_json(),
+            "world": {"entities": entities, "values": world.values},
+            # Keep the historical projection for service clients and tests.
             "vars": run.session.vars,
             "check": run.session._check(),
             "rngState": run.session.rng.bit_generator.state,
             "huntSeed": run.session._hunt_seed,
+            "lastReport": run.session.last_report,
+            "bestReport": report,
+            "certifyReport": run.certify_report,
+            "declaredPlans": run.declared_plans,
+            "openExpectations": run.open_expectations,
+            "expectationSequence": run._expectation_seq,
+            "artifactCounters": {
+                "dispatch": run.seq,
+                "looks": run.looks,
+                "views": run.views_taken,
+                "imaginings": run.imaginings,
+            },
+            "deductiveProof": _proof_state(run),
             "finished": run.finished,
             "stopRequested": run.stop_requested,
             "summary": run.summary,
-            "declaredPlans": run.declared_plans,
-            "bestReport": report,
-            "deductiveProof": _proof_state(run),
         }
     )
 
@@ -218,7 +254,16 @@ class KernelTransport:
             }
         )
         if replay_journal is not None:
-            self._replay(replay_journal, replay_through)
+            try:
+                self._replay(replay_journal, replay_through)
+            except Exception:
+                # A rejected prefix is a normal fail-closed path. Do not leave
+                # the partially replayed transport's three owned files open.
+                self._fh.close()
+                self.run._transcript.close()
+                self.run.trace.close()
+                self._closed = True
+                raise
 
     def _write(self, record: dict[str, Any]) -> None:
         self._fh.write(json.dumps(_jsonable(record), ensure_ascii=False, allow_nan=False) + "\n")

@@ -1,7 +1,7 @@
 # SimAgent pi runtime
 
 This package is SimAgent's thin TypeScript control plane. It uses exact-pinned
-`@earendil-works/pi-coding-agent` 0.81.1 and keeps Python as the only
+`@earendil-works/pi-coding-agent` 0.82.0 and keeps Python as the only
 world, proof, and verdict authority.
 
 ## Boundary
