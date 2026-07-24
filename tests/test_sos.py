@@ -101,6 +101,71 @@ def test_lean_rejects_a_tampered_certificate(tamper):
     assert lean_check.check_source(src)["ok"] is False
 
 
+def test_every_failure_mode_tells_the_model_something_actionable():
+    """A dead end with no reason is a dead end the model cannot act on. Each
+    failure must name a DIFFERENT next move."""
+    cases = {
+        "tight": (x**2 + y**2 - 2 * x * y, [x, y], "TIGHT"),
+        "not_psd": (2 * (x**2 + y**2 + z**2) - (x + y + z) ** 2, [x, y, z], "counterexample"),
+        "odd_degree": (x**3, [x], "odd total degree"),
+    }
+    for name, (poly, syms, expected) in cases.items():
+        notes = []
+        sos.prove_positive(poly, syms, eps_hint=sp.Rational(1, 10), notes=notes)
+        assert notes, f"{name} returned no reason"
+        assert any(expected in n for n in notes), f"{name}: {notes}"
+
+
+def test_the_model_can_actually_reach_the_instrument(tmp_path):
+    """The harness exists to serve the model: a capability it cannot invoke is
+    a capability it does not have."""
+    from simagent.agent import TOOLS
+
+    assert "sum_of_squares" in [t["name"] for t in TOOLS]
+
+
+@lean
+def test_instrument_proves_and_explains(tmp_path):
+    import json
+
+    from simagent.agent import AgentRun
+
+    run = AgentRun(get("positive-quadratic"), out_dir=tmp_path)
+    run._t_hunt(trials=300)
+    out = json.loads(run._t_sum_of_squares())
+    assert out["proved"] is True
+    assert out["verified_by"] == "sandbox+lean"
+    assert run.deductive is not None and run.deductive.method is Method.DIRECT
+
+    # a later failed attempt must NOT clobber the verified certificate
+    run._t_submit_lean_proof(method="direct", argument="hand-waving", lean_code=None)
+    assert run.deductive.verified_by == "sandbox+lean"
+
+
+def test_instrument_refuses_when_a_counterexample_is_on_the_table(tmp_path):
+    import json
+
+    from simagent.agent import AgentRun
+
+    run = AgentRun(get("sum-of-squares-vs-linear"), out_dir=tmp_path)
+    run._t_hunt(trials=300)
+    out = json.loads(run._t_sum_of_squares())
+    assert out["proved"] is False
+    assert any("counterexample" in n for n in out["notes"])
+    assert run.deductive is None
+
+
+def test_instrument_asks_for_a_search_before_a_proof(tmp_path):
+    import json
+
+    from simagent.agent import AgentRun
+
+    run = AgentRun(get("positive-quadratic"), out_dir=tmp_path)
+    out = json.loads(run._t_sum_of_squares())
+    assert out["proved"] is False
+    assert "hunt" in out["reason"]
+
+
 def test_sos_proof_refuses_a_claim_it_should_not_touch():
     claim = get("sum-of-squares-vs-linear")  # FALSE: a counterexample exists
     report = run_search(claim, trials=300, seed=3)

@@ -24,6 +24,10 @@ from .web.session import SandboxSession
 
 MAX_TOOL_CHARS = 2000
 
+# keep-best ordering for deductive attempts; mirrors proof.py's ladder so a
+# later failed attempt can never clobber a verified one
+_VERIFIED_RANK = {"sandbox+lean": 3, "lean": 2, "sandbox": 1, "none": 0}
+
 SYSTEM = """You are a mathematician placed inside SimAgent, a 3D math sandbox.
 You are embodied: `look` shows you the current configuration as a rendered
 image; the other tools move points and run the harness machinery. Use your
@@ -32,7 +36,17 @@ eyes — geometry that looks wrong usually is wrong.
 Your task: settle the conjecture with one of the ten classical proof methods
 (direct, contradiction, contrapositive, induction, cases, construction,
 counterexample, exhaustion, combinatorial, infinite descent). That list is
-your option menu — pick a line of attack and pursue it in the scene.
+your option menu — pick a line of attack and pursue it in the scene. The
+choice is YOURS; the harness only hands you instruments.
+
+Four of those methods have an instrument here, and each is a different
+question: `hunt` looks for a counterexample (one bad configuration settles a
+`forall` against you), `construct` + `certify` builds a witness for an
+existence claim, `exhaust` checks every case of a finite domain, and
+`sum_of_squares` proves an inequality outright by making the margin a sum of
+squares — the only way to establish a `forall` over a CONTINUOUS domain,
+since no number of good samples ever proves one. For the other six methods,
+reason in the scene and finish with `submit_lean_proof`.
 
 Think in the scene, not in prose: form each hypothesis as a configuration you
 can look at, then act on it. Every act is traced — thought, move, resulting
@@ -56,7 +70,8 @@ declaration is recorded as intent — it never becomes the verdict; what you
 
 The harness is the authority, and it is strict:
 - Only these count as established: a `certify` that returns CERTIFIED (exact
-  rational arithmetic), an `exhaust` over the full finite domain, or
+  rational arithmetic), an `exhaust` over the full finite domain, a
+  `sum_of_squares` certificate the Lean kernel accepts, or
   `submit_lean_proof` code that the Lean kernel accepts (Lean 4 CORE only —
   no imports, no Mathlib, no sorry; prefer `decide`-style statements; end
   with `#print axioms <name>`).
@@ -190,6 +205,19 @@ TOOLS = [
     {
         "name": "certify",
         "description": "Exact-rational verdict for the current configuration; CERTIFIED results count as proof material.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "sum_of_squares",
+        "description": (
+            "Instrument for a DIRECT proof of an inequality: try to write the claim's "
+            "margin as a sum of squares, which makes it nonnegative at EVERY point at "
+            "once — the only way to establish a 'forall' over a continuous domain "
+            "(hunting can refute one, never prove one). Reach for this when you have "
+            "decided the claim is true and the margin is polynomial. It is recorded "
+            "only if the Lean kernel accepts the certificate. On failure you get the "
+            "reason, so you can choose a different method."
+        ),
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
@@ -580,17 +608,51 @@ class AgentRun:
         self._step_extra = {"certified": r.get("certified"), "exact": r.get("exact")}
         return json.dumps(r, default=str)[:MAX_TOOL_CHARS]
 
+    def _keep_best_deductive(self, attempt) -> None:
+        """Never let a later failed attempt clobber a verified one."""
+        rank = _VERIFIED_RANK
+        if self.deductive is None or rank.get(attempt.verified_by, 0) >= rank.get(
+            self.deductive.verified_by, 0
+        ):
+            self.deductive = attempt
+
+    def _t_sum_of_squares(self):
+        """The model chose a direct proof; the harness runs the instrument.
+
+        Choosing to call this IS the method declaration, exactly as `hunt` is
+        the counterexample instrument and `exhaust` the exhaustion one. The
+        kernel still decides whether anything was established."""
+        from . import library
+
+        report = self.best_report()
+        if report is None:
+            return json.dumps({
+                "proved": False,
+                "reason": "no search report yet — run hunt (or sample) first, so "
+                          "the kernel knows no counterexample turned up",
+            })
+        notes: list[str] = []
+        proof = proof_mod.sos_proof(
+            self.spec, report, out_dir=self.out,
+            spec_trusted=library.is_bundled(self.spec), notes=notes,
+        )
+        if proof is not None:
+            self._keep_best_deductive(proof)
+        self._step_extra = {"method": "direct",
+                            "verified_by": proof.verified_by if proof else "none"}
+        return json.dumps({
+            "proved": proof is not None,
+            "verified_by": proof.verified_by if proof else "none",
+            "argument": proof.argument if proof else None,
+            "notes": notes,
+        }, default=str)[:MAX_TOOL_CHARS]
+
     def _t_submit_lean_proof(self, method: str, argument: str, lean_code: str | None = None):
         attempt = proof_mod.deductive_proof(
             self.spec, method, argument, lean_code, out_dir=self.out
         )
         self._step_extra = {"method": method, "verified_by": attempt.verified_by}
-        # Keep-best: never let a later failed attempt clobber a verified one.
-        rank = {"lean": 2, "none": 0}
-        if self.deductive is None or rank.get(attempt.verified_by, 0) >= rank.get(
-            self.deductive.verified_by, 0
-        ):
-            self.deductive = attempt
+        self._keep_best_deductive(attempt)
         detail = (attempt.lean_report or {}).get("output", "no Lean code given")
         return f"recorded: method={method}, verified_by={attempt.verified_by}. Lean says: {detail[:800]}"
 

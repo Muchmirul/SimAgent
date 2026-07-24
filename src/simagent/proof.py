@@ -165,7 +165,8 @@ def _attach_sos_lean(proof: Proof, spec: ProblemSpec, cert: dict, out_dir) -> No
 
 
 def sos_proof(
-    spec: ProblemSpec, report: SearchReport, out_dir=None, spec_trusted: bool = False
+    spec: ProblemSpec, report: SearchReport, out_dir=None, spec_trusted: bool = False,
+    notes: list | None = None,
 ) -> Proof | None:
     """Prove a universal claim outright with a sum-of-squares certificate.
 
@@ -176,20 +177,30 @@ def sos_proof(
     """
     from .sandbox import sos
 
-    if getattr(spec, "quantifier", None) != "forall" or report.verdict != "no_counterexample":
+    say = notes.append if notes is not None else (lambda _m: None)
+    if getattr(spec, "quantifier", None) != "forall":
+        say("a sum-of-squares certificate proves a 'forall' claim; this claim is not one")
+        return None
+    if report.verdict != "no_counterexample":
+        say(f"the search verdict is {report.verdict!r}: settle that before trying to prove it")
         return None
     got = _margin_polynomial(spec)
     if got is None:
+        say("the margin is not a symbolic polynomial in the free variables "
+            "(an `expr` measure with no recipe is what this needs)")
         return None
     poly, symbols = got
     hint = None
     if report.margin_min is not None and report.margin_min > 0:
         hint = sp.Rational(report.margin_min).limit_denominator(64) / 2
     try:
-        cert = sos.prove_positive(poly, symbols, eps_hint=hint)
-    except sos.SOSError:
+        cert = sos.prove_positive(poly, symbols, eps_hint=hint, notes=notes)
+    except sos.SOSError as e:
+        say(str(e))
         return None
-    if cert is None or not cert["strict"]:
+    if cert is None:
+        return None
+    if not cert["strict"]:
         return None  # eps == 0 proves p >= 0, which does not settle a strict claim
 
     eps = cert["eps"]
@@ -210,7 +221,12 @@ def sos_proof(
     )
     _attach_sos_lean(proof, spec, cert, out_dir)
     if proof.verified_by != "sandbox+lean":
-        return None  # deductive means Lean-or-nothing
+        # deductive means Lean-or-nothing, with no exception for a certificate
+        # sympy is happy with
+        say("a sum-of-squares decomposition was found, but the Lean kernel did "
+            f"not accept the certificate: {(proof.lean_report or {}).get('output', '')[:200]}")
+        return None
+    say(f"certificate accepted by the Lean kernel: margin >= {eps} everywhere")
     return proof
 
 

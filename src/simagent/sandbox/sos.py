@@ -73,13 +73,15 @@ def _psd_squares(G: sp.Matrix) -> list[tuple] | None:
     return squares
 
 
-def find_sos(poly: sp.Expr, symbols: list, eps=0) -> dict | None:
+def find_sos(poly: sp.Expr, symbols: list, eps=0, notes: list | None = None) -> dict | None:
     """Exact rational sum-of-squares certificate for `poly - eps`, or None.
 
     Raises SOSError when the margin is not a polynomial at all (or is past
     the size caps); returns None when it is polynomial but no certificate was
-    found with this incomplete search.
+    found with this incomplete search. Every failure appends its REASON to
+    `notes`: a dead end with no reason is a dead end the caller cannot act on.
     """
+    say = notes.append if notes is not None else (lambda _m: None)
     target_expr = sp.expand(poly - sp.nsimplify(eps))
     if len(symbols) > MAX_VARS:
         raise SOSError(f"sum-of-squares search caps at {MAX_VARS} variables")
@@ -100,7 +102,9 @@ def find_sos(poly: sp.Expr, symbols: list, eps=0) -> dict | None:
     if deg > MAX_DEGREE:
         raise SOSError(f"sum-of-squares search caps at total degree {MAX_DEGREE}")
     if deg % 2 == 1:
-        return None  # an odd-degree polynomial is negative somewhere
+        say(f"the margin has odd total degree {deg}, so it takes negative values "
+            "somewhere: no sum-of-squares decomposition can exist")
+        return None
 
     basis = _monomials(len(symbols), deg // 2)
     n = len(basis)
@@ -119,25 +123,36 @@ def find_sos(poly: sp.Expr, symbols: list, eps=0) -> dict | None:
     target = {tuple(mon): sp.nsimplify(c) for mon, c in zip(P.monoms(), P.coeffs())}
     for m, c in target.items():
         if m not in produced:
-            return None  # p has a monomial no product of basis monomials can make
+            say(f"the margin contains the monomial {m}, which no product of two "
+                "basis monomials can produce")
+            return None
 
     equations = [sp.Eq(sum(terms), target.get(m, 0)) for m, terms in produced.items()]
     unknowns = sorted(g.values(), key=lambda s: s.name)
     solution = sp.solve(equations, unknowns, dict=True)
     if not solution:
+        say("no Gram matrix reproduces the margin's coefficients over this "
+            "monomial basis")
         return None
     sub = solution[0]
     # the remaining freedom is exactly what a semidefinite solver would search;
     # this pins it at zero, which is why a None here is "not found", not "none exists"
     values = {s: sp.nsimplify(sub.get(s, 0)).subs({u: 0 for u in unknowns}) for s in unknowns}
     if any(not v.is_rational for v in values.values()):
+        say("the Gram matrix solution is not rational")
         return None
 
     G = sp.Matrix(n, n, lambda i, j: values[gsym(i, j)])
     squares = _psd_squares(G)
     if squares is None:
+        say("a Gram matrix was found but it is not positive semidefinite once "
+            "its free parameters are pinned at zero; this search is incomplete, "
+            "so a certificate may still exist (a semidefinite search would find "
+            "it). The margin may also simply be negative somewhere - hunting for "
+            "a counterexample would settle that")
         return None
     if not _verify(target_expr, symbols, basis, squares):
+        say("the decomposition failed its own exact expansion check")
         return None
     # Every monomial the basis can PRODUCE, not just the ones p mentions: a
     # product like x*y that p lacks still has to be forced to zero, and the
@@ -158,7 +173,8 @@ def _verify(target_expr: sp.Expr, symbols: list, basis: list, squares: list) -> 
     return sp.expand(target_expr - total) == 0
 
 
-def prove_positive(poly: sp.Expr, symbols: list, eps_hint=None) -> dict | None:
+def prove_positive(poly: sp.Expr, symbols: list, eps_hint=None,
+                   notes: list | None = None) -> dict | None:
     """Certify p > 0 everywhere (strict) by certifying p - eps as SOS.
 
     `eps_hint` is typically half the smallest margin the search ever saw. A
@@ -175,7 +191,14 @@ def prove_positive(poly: sp.Expr, symbols: list, eps_hint=None) -> dict | None:
         if found is not None:
             found["strict"] = True
             return found
-    found = find_sos(poly, symbols, eps=0)
+    found = find_sos(poly, symbols, eps=0, notes=notes)
     if found is not None:
         found["strict"] = False
+        if notes is not None:
+            notes.append(
+                "the margin is a sum of squares, so it is >= 0 everywhere, but no "
+                "positive lower bound was found: the inequality is TIGHT (it touches "
+                "equality). A strict claim is therefore not proved - check whether "
+                "the equality case is inside the claim's domain"
+            )
     return found

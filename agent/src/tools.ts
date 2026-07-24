@@ -73,6 +73,7 @@ const TOOL_SCHEMAS: Record<string, TSchema> = {
   hunt: Type.Object({ trials: Type.Optional(Type.Integer()) }, { additionalProperties: false }),
   exhaust: Empty(),
   certify: Empty(),
+  sum_of_squares: Empty(),
   submit_lean_proof: Type.Object(
     {
       method: StringEnum(METHODS),

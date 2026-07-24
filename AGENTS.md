@@ -7,6 +7,11 @@ ARCHITECTURE.md before touching the kernel, especially the contributor rules
 (only proof.py sets verified_by; fail closed; every bundled Claim is a
 known-answer test). Current baseline: v2 P0-P6 landed.
 
+core idea of sim agent is this :
+1. simagent is the harness on how to get of the best harness to routed models llm, to solve any math problem by experiencing doing math by viz and equation is just formalization. instead of just using text file. and gathering information from outside. doing it by first principle.
+2. as a toll human and ai agent can collaborate on solving, sometimes human get stuck agent help, and sometime human giving idea while agent stuck. this done by seamless ui that human can giving comment on the step that agent do.
+
+
 ## Commands
 
 ```bash
@@ -140,9 +145,19 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
   certified counterexample, verified_by="sandbox", explicit no-Lean-above-d3
   notice (leangen raises "capped at d<=3"; answer.py prints the notice).
 - Closed agent tools are plan, look, sample, set_var, nudge, check, measure,
-  view, imagine, refine, hunt, exhaust, certify, submit_lean_proof, construct,
-  expect, and finish. TypeScript checks its schemas against Python and exposes
-  no pi coding tools or discovered resources.
+  view, imagine, refine, hunt, exhaust, certify, sum_of_squares,
+  submit_lean_proof, construct, expect, and finish. TypeScript checks its
+  schemas against Python and exposes no pi coding tools or discovered
+  resources.
+- The model picks the proof method; the harness only hands it instruments.
+  Calling an instrument IS the declaration (hunt = counterexample, construct +
+  certify = construction, exhaust = exhaustion, sum_of_squares = direct); the
+  other six of the ten methods finish through submit_lean_proof. Never add a
+  tool that decides the method for the model.
+- Every instrument must explain its failures. `sos.find_sos`/`prove_positive`
+  and `proof.sos_proof` take a `notes` list and append the REASON at each
+  refusal (tight/equality case, Gram matrix not PSD, odd degree, wrong
+  verdict), because a dead end with no reason is one the model cannot act on.
 - `kernel_transport.py` is the provider-free JSONL kernel boundary; `agent/`
   is the exact-pinned pi runtime and session service. Product turns accept one
   kernel action, making tool cells settled branch points.
