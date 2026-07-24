@@ -145,11 +145,13 @@ def find_sos(poly: sp.Expr, symbols: list, eps=0, notes: list | None = None) -> 
     G = sp.Matrix(n, n, lambda i, j: values[gsym(i, j)])
     squares = _psd_squares(G)
     if squares is None:
+        # Report the limit, name neither a verdict nor a next method: choosing
+        # what to try next is the model's job, not the harness's.
         say("a Gram matrix was found but it is not positive semidefinite once "
-            "its free parameters are pinned at zero; this search is incomplete, "
+            "its free parameters are pinned at zero. This search is incomplete, "
             "so a certificate may still exist (a semidefinite search would find "
-            "it). The margin may also simply be negative somewhere - hunting for "
-            "a counterexample would settle that")
+            "one). The margin may equally be negative somewhere. This instrument "
+            "cannot tell those two cases apart")
         return None
     if not _verify(target_expr, symbols, basis, squares):
         say("the decomposition failed its own exact expansion check")

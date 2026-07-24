@@ -103,10 +103,14 @@ def test_lean_rejects_a_tampered_certificate(tamper):
 
 def test_every_failure_mode_tells_the_model_something_actionable():
     """A dead end with no reason is a dead end the model cannot act on. Each
-    failure must name a DIFFERENT next move."""
+    failure must state a DIFFERENT fact about why the instrument stopped.
+
+    Facts, not advice: naming the next method to try would be the harness
+    doing the model's thinking (see test_harness_never_picks_the_method)."""
     cases = {
         "tight": (x**2 + y**2 - 2 * x * y, [x, y], "TIGHT"),
-        "not_psd": (2 * (x**2 + y**2 + z**2) - (x + y + z) ** 2, [x, y, z], "counterexample"),
+        "not_psd": (2 * (x**2 + y**2 + z**2) - (x + y + z) ** 2, [x, y, z],
+                    "cannot tell those two cases apart"),
         "odd_degree": (x**3, [x], "odd total degree"),
     }
     for name, (poly, syms, expected) in cases.items():
@@ -114,6 +118,22 @@ def test_every_failure_mode_tells_the_model_something_actionable():
         sos.prove_positive(poly, syms, eps_hint=sp.Rational(1, 10), notes=notes)
         assert notes, f"{name} returned no reason"
         assert any(expected in n for n in notes), f"{name}: {notes}"
+
+
+def test_harness_never_picks_the_method_for_the_model():
+    """SimAgent is a harness: it supplies capability, perception and facts,
+    never the strategy. An instrument reporting its own limits is doing its
+    job; an instrument telling the model which of the ten methods to reach
+    for next has taken over the model's thinking."""
+    advice = ("hunting", "you should", "try instead", "next, ", "we recommend")
+    for poly, syms in [(2 * (x**2 + y**2 + z**2) - (x + y + z) ** 2, [x, y, z]),
+                       (x**3, [x]),
+                       (x**2 + y**2 - 2 * x * y, [x, y])]:
+        notes = []
+        sos.prove_positive(poly, syms, eps_hint=sp.Rational(1, 10), notes=notes)
+        for n in notes:
+            lowered = n.lower()
+            assert not any(a in lowered for a in advice), f"harness is steering: {n}"
 
 
 def test_the_model_can_actually_reach_the_instrument(tmp_path):

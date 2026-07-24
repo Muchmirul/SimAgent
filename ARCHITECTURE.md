@@ -1,10 +1,16 @@
 # SimAgent architecture
+THIS PROJECT IS ONLY HARNESS, thinking or any thought must come from the model itself, which must not be provided here
 
 SimAgent is an **agent harness for visualization-based math**: a small kernel
 with a strict responsibility split, where correctness beats features. Humans
 and agents solve math by communicating through visuals — imagine, visualize,
 act, and only then formalize (equations are the *translation* of thought,
 never the medium). See plan.md for the full v2 design and decision log.
+
+core idea of sim agent is this :
+1. simagent is the harness on how to get of the best harness to routed models llm, to solve any math problem by experiencing doing math by viz and equation is just formalization. instead of just using text file. and gathering information from outside. doing it by first principle.
+2. as a toll human and ai agent can collaborate on solving, sometimes human get stuck agent help, and sometime human giving idea while agent stuck. this done by seamless ui that human can giving comment on the step that agent do.
+
 
 ## The eight atoms
 

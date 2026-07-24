@@ -1,16 +1,21 @@
-# SimAgent — notes for Claude
+# SimAgent — notes for the agent
+
+AGENTS.md and CLAUDE.md are the same file, kept byte-identical on purpose so
+every tool reads one source of truth. Edit one, copy it to the other.
 
 Pi-managed harness for visualization-based, finite-dimensional math: a small
 correctness-first kernel. The LLM reasons; the harness records only what it can
 execute or check; the Lean kernel is the sole authority on deduction. Read
-ARCHITECTURE.md before touching the kernel, especially the contributor rules
-(only proof.py sets verified_by; fail closed; every bundled Claim is a
-known-answer test). Current baseline: v2 P0-P6 landed.
+ARCHITECTURE.md before touching the kernel. Current baseline: v2 P0-P6 landed.
 
 core idea of sim agent is this :
 1. simagent is the harness on how to get of the best harness to routed models llm, to solve any math problem by experiencing doing math by viz and equation is just formalization. instead of just using text file. and gathering information from outside. doing it by first principle.
 2. as a toll human and ai agent can collaborate on solving, sometimes human get stuck agent help, and sometime human giving idea while agent stuck. this done by seamless ui that human can giving comment on the step that agent do.
 
+Other docs, so you do not duplicate them here: ARCHITECTURE.md (kernel design +
+contributor rules), README.md (what the project is, for a newcomer), GUIDE.md
+(how to use the tool), plan.md (the P0-P7 roadmap), agent/README.md (the pi
+package on its own terms).
 
 ## Commands
 
@@ -20,34 +25,11 @@ core idea of sim agent is this :
 .venv/bin/simagent list                       # bundled problems
 .venv/bin/simagent solve <id> [--trials N --seed S --render-manim]
 .venv/bin/simagent solve --conjecture "..."   # needs Claude API auth
+.venv/bin/simagent formalize "..." --out spec.json
 .venv/bin/simagent play <id>                  # interactive REPL; preview.png re-renders per command
 .venv/bin/simagent web                        # reasoning notebook on :8642 (problem in, visual reasoning cells out)
 .venv/bin/simagent agent <id>                 # also accepts --spec FILE or --conjecture "..."
 ```
-
-Agent mode uses the TypeScript runtime under `agent/`, with
-`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` exact-pinned at 0.82.0. Pi owns
-provider auth, model turns, events, steering, and conversation sessions. The
-Python `AgentRun` owns kernel-side tools, trace state, proof candidates, and
-finalization; `look` returns a vision image. `kernel_transport.py` is the
-strict JSONL boundary, and `pi_agent.py` is the web app's thin service client.
-Verdicts come only from kernel state, never model prose or comments.
-
-Every pi-managed agent run writes `trace.jsonl` for thought, action, scene, equation, and
-diff cells, plus `kernel-journal.jsonl` for replayable calls and state hashes.
-Comments enter pi with `session.steer()` and are journaled as `user_comment`;
-the annotation must preserve the full kernel state hash. Branches copy a
-settled pi conversation prefix, replay the matching kernel journal prefix,
-verify the exact hash, and add provenance. The notebook supports selecting a
-cell or line, or raycast-picking a 3D primitive, for comment or branch. Pi
-events are available through `/api/agent/{run}/stream`.
-
-Post-audit invariants (do not regress — see test_hardening.py): lean_check
-binds axiom-freedom to printed theorem NAMES and rejects sorry/admit/
-native_decide/'depends on axioms'; run_exhaustive is fail-closed (certified
-only via exact certifier or integer-exact domain; check-raises => incomplete;
-empty/inverted domains rejected); mechanized_proof stamps statement_review
-'spec-generated-review-needed' unless library.is_bundled(spec).
 
 Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
 *different project's* venv (jacobian-conjecture). Install with
@@ -55,100 +37,156 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
 
 ## Architecture map
 
-- `src/simagent/proof.py` — THE proof kernel: ten classical methods, Proof
-  record, `verified_by` ladder (sandbox+lean > sandbox > lean > none). Only
-  this module assigns stamps. Mechanized methods: counterexample,
-  construction, exhaustion; everything deductive is Lean-or-nothing.
-  `sos_proof()` is the only route to PROVING a `forall` over a continuous
-  domain (search can refute one but never establish one): it certifies the
-  margin as a sum of squares, and being a DIRECT (deductive) method it
-  returns None unless the Lean kernel accepts the certificate. It requires a
-  STRICT certificate (margin >= eps > 0); eps == 0 proves only margin >= 0,
-  which does not settle a strict claim, so it is never upgraded.
-- `src/simagent/lean_check.py` + `sandbox/leangen.py` — generated Lean 4
-  *core* certificates (`by decide`, rationals as integer pairs), checked with
-  a bare `lean file.lean` (toolchain: `~/.elan/bin/lean`, installed via elan,
-  no sudo, no Mathlib). Checker is fail-closed incl. `#print axioms` clean.
-- `src/simagent/core/` contains seven pure atoms: space, entity, op, derive,
-  measure, claim, and journal. The eighth atom, view, lives in `views/`.
-  `space.py` is the one domain sampler; `claim.py` owns the closed registries
-  and `validate_claim()`, the gate for LLM output. `expr.py` is the GENERAL
-  vocabulary: one safe arithmetic AST (whitelist, no exec/eval) drives three
-  evaluators — float (search), exact sympy (certify), Lean Q-terms (stamp) —
-  behind the `expr` measure/certifier/Lean hook. Any rational inequality over
-  a box is therefore expressible with no new code and carries no d<=3 cap.
-  Prefer `expr` over adding a problem-specific measure; validate_claim rejects
-  a certifier or Lean hook whose margin is not the measure's margin verbatim.
-  `derive.py` holds the geometry kit; EVERY constructor must carry an `exact`
-  counterpart, because `_exact_recipe_env` replays the recipe in rational
-  arithmetic so a margin may read a derived entity and still certify. Lean
-  takes only FREE variables as atoms: a certificate over a derived value would
-  check a bare number and prove nothing about how it was constructed, so
-  claims with a recipe top out at `sandbox`.
-- `src/simagent/spec.py` is the deprecated legacy compatibility path. It still
-  compiles old exec-code disk specs; `ProblemSpec.load` routes native
-  `claim/1` JSON to `core.claim`. Bundled and LLM-created problems use Claims.
-- `src/simagent/sandbox/` — `geometry.py` (numeric toolbox: circumcenter,
-  barycentric, hulls), `certify.py` (sympy exact mirror + rationalization),
-  `scene.py` (renderer-agnostic scene-graph primitives), `sos.py` (exact
-  rational sum-of-squares search: monomial basis, Gram matrix, symmetric
-  elimination for the PSD split). The SOS search is deliberately INCOMPLETE
-  and says so: it pins the Gram matrix's free parameters at zero instead of
-  solving an SDP, so a failure means "no certificate found", never "none
-  exists".
-- `src/simagent/search.py` — random sampling + margin-guided annealing +
+Each module is described once, here. State it nowhere else.
+
+**Kernel and proving**
+
+- `proof.py` — THE proof kernel: ten classical methods, Proof record,
+  `verified_by` ladder (sandbox+lean > sandbox > lean > none). Only this
+  module assigns stamps. Mechanized methods: counterexample, construction,
+  exhaustion; everything deductive is Lean-or-nothing. `sos_proof()` is the
+  only route to PROVING a `forall` over a continuous domain (search can refute
+  one but never establish one): it certifies the margin as a sum of squares,
+  and being a DIRECT (deductive) method it returns None unless the Lean kernel
+  accepts the certificate. It requires a STRICT certificate (margin >= eps >
+  0); eps == 0 proves only margin >= 0, which does not settle a strict claim,
+  so it is never upgraded.
+- `lean_check.py` + `sandbox/leangen.py` — generated Lean 4 *core*
+  certificates (`by decide`, rationals as integer pairs), checked with a bare
+  `lean file.lean`. The toolchain IS installed (`~/.elan/bin/lean`, Lean
+  4.32.1, via elan, no sudo, no Mathlib). The checker is fail-closed including
+  `#print axioms` clean. Lean *skeletons* (conjecture.lean) stay UNCHECKED.
+  leangen is capped at d<=3.
+- `search.py` — random sampling + margin-guided annealing +
   rationalize-and-certify. **Margin convention: margin > 0 ⇔ property holds**;
   search minimizes it for `forall` (counterexamples), maximizes for `exists`.
-- `src/simagent/visualize/` — `mpl.py` (always-on PNG), `manim_gen.py`
-  (generates self-contained ThreeDScene). Manim runs from a repo-local
-  conda-forge env `.manim-env/` (micromamba, no sudo — pip manim is impossible
-  here: no cairo headers); `_manim_python()` resolves SIMAGENT_MANIM_PYTHON →
-  current interpreter → `.manim-env`. Degrade gracefully if absent.
-- `src/simagent/web/` — notebook UI + kernel API. `session.py`
-  (SandboxSession: server-authoritative state), `app.py` (FastAPI:
+- `sandbox/` — `geometry.py` (numeric toolbox: circumcenter, barycentric,
+  hulls), `certify.py` (sympy exact mirror + rationalization), `scene.py`
+  (renderer-agnostic scene-graph primitives), `sos.py` (exact rational
+  sum-of-squares search: monomial basis, Gram matrix, symmetric elimination
+  for the PSD split). The SOS search is deliberately INCOMPLETE and says so:
+  it pins the Gram matrix's free parameters at zero instead of solving an SDP,
+  so a failure means "no certificate found", never "none exists".
+
+**The eight atoms**
+
+- `core/` holds seven pure atoms: space, entity, op, derive, measure, claim,
+  journal. The eighth atom, view, lives in `views/`. The layer is pure and
+  `tests/test_layering.py` enforces it.
+- `core/space.py` is the one domain sampler; each Space declares its own
+  dimension.
+- `core/claim.py` owns the closed registries (MEASURES, CONSTRAINTS,
+  CERTIFIERS, LEANS, SCENES) and `validate_claim()`, the gate for LLM output.
+- `core/expr.py` is the GENERAL vocabulary: one safe arithmetic AST
+  (whitelist, no exec/eval) drives three evaluators — float (search), exact
+  sympy (certify), Lean Q-terms (stamp) — behind the `expr`
+  measure/certifier/Lean hook. Any rational inequality over a box is therefore
+  expressible with no new code and carries no d<=3 cap. Prefer `expr` over
+  adding a problem-specific measure; validate_claim rejects a certifier or
+  Lean hook whose margin is not the measure's margin verbatim.
+- `core/derive.py` holds the geometry kit and CONSTRUCTORS. EVERY constructor
+  must carry an `exact` counterpart, because `_exact_recipe_env` replays the
+  recipe in rational arithmetic so a margin may read a derived entity and
+  still certify. Lean takes only FREE variables as atoms: a certificate over a
+  derived value would check a bare number and prove nothing about how it was
+  constructed, so claims with a recipe top out at `sandbox`.
+- `core/journal.py` is the mind trace. `trace.py` is a compatibility shim that
+  re-exports it; new code imports `core.journal` directly.
+- `views/` is the eighth atom plus the analytical output views: `identity`
+  (scene graph as-is, d<=3), `field` (margin over a 2D slice; the zero-contour
+  is the theorem's shape), `sweep` (margin along one coordinate, zero
+  crossings marked), `trajectory` (margin vs journal step, the convergence
+  plot), `ghost` (before/after overlay for imagination and diff replays).
+  Registered scene builders render Space state; simplex scenes above d=3
+  explicitly project to the first three coordinates and label the projection.
+
+**Problems in, answers out**
+
+- `library/` contains eight bundled native Claims (zero exec'd code: a recipe
+  plus registry keys): circumcenter in triangle / tetrahedron / 4-simplex,
+  orthocenter in triangle, sum of squares vs linear, positive quadratic, sum
+  of odds, Euler polyhedron. Every bundled Claim is a known-answer test. The
+  triangle Claim is the LLM few-shot example. Four carry a specific job:
+  `sum-of-squares-vs-linear` (vocabulary) has margin (x-1)²+(y-1)²-1, so the
+  field view's zero-contour is that unit circle, the algebraic echo of Thales;
+  `orthocenter-in-triangle` (geometry kit) has a margin over a DERIVED entity,
+  which certification reaches only by replaying the recipe exactly;
+  `positive-quadratic` (proving) is the TRUE twin of `sum-of-squares-vs-linear`
+  with one constant changed, proved outright by a Lean-checked sum-of-squares
+  certificate rather than left as evidence; `circumcenter-in-4simplex` (ℝ⁴) is
+  the dimension-agnostic test: certified counterexample, verified_by
+  "sandbox", with the explicit no-Lean-above-d3 notice printed by answer.py.
+- `spec.py` is the deprecated legacy compatibility path. It still compiles old
+  exec-code disk specs; `ProblemSpec.load` routes native `claim/1` JSON to
+  `core.claim`. Bundled and LLM-created problems use Claims.
+- `llm.py` is the Claude formalizer (`messages.parse` structured output, model
+  `claude-opus-4-8`, adaptive thinking) with a `validate_claim()` repair loop.
+  Its closed-vocabulary prompt is generated from registry `doc` strings.
+- `pipeline.py` orchestrates one full run (spec → search → certify → visualize
+  → answer) into a self-describing directory: spec.json, report.json,
+  preview.png, scene.json, scene_manim.py, answer.md, answer.tex,
+  conjecture.lean, optional proof_sketch.md and media/.
+- `answer.py` writes answer.md / answer.tex / conjecture.lean. Verdict wording
+  is deliberate: certified vs numeric-candidate vs evidence. Never upgrade the
+  claim.
+- `cli.py` is the command surface listed above; `play.py` is the interactive
+  sandbox that re-renders `preview.png` after every command.
+- `visualize/` — `mpl.py` (always-on PNG), `manim_gen.py` (generates a
+  self-contained ThreeDScene). Manim runs from a repo-local conda-forge env
+  `.manim-env/` (micromamba, no sudo — pip manim is impossible here: no cairo
+  headers); `_manim_python()` resolves SIMAGENT_MANIM_PYTHON → current
+  interpreter → `.manim-env`. Degrade gracefully if absent.
+
+**Agent mode and the web notebook**
+
+- `agent.py` (`AgentRun`) owns kernel-side tool state: sandbox actions, trace,
+  proof candidates, finalization. No provider, no model loop. `look` returns a
+  vision image.
+- `kernel_transport.py` is the provider-free, strict JSONL kernel boundary.
+- `agent/` is the TypeScript pi runtime, with
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` exact-pinned
+  at 0.82.0. Pi owns provider auth, model turns, events, steering, and
+  conversation sessions. Inside: `tools.ts` (the closed tool schemas, checked
+  against Python), `kernel-client.ts` (spawns and talks to the Python kernel),
+  `runtime.ts` (model turns), `controller.ts` (run lifecycle), `service.ts`
+  (the HTTP control service), `cli.ts`, `index.ts`.
+- `pi_agent.py` is the web app's thin Python client for that service. It
+  transports commands only; no response from it can mint a verdict.
+- Closed agent tools: plan, look, sample, set_var, nudge, check, measure,
+  view, imagine, refine, hunt, exhaust, certify, sum_of_squares,
+  submit_lean_proof, construct, expect, finish. TypeScript exposes no pi
+  coding tools and no discovered resources.
+- Every run writes `trace.jsonl` (thought, action, scene, equation, diff
+  cells) and `kernel-journal.jsonl` (replayable calls and state hashes).
+  Comments enter pi with `session.steer()` and are journaled as
+  `user_comment`; the annotation must preserve the full kernel state hash.
+  Branches copy a settled pi conversation prefix, replay the matching kernel
+  journal prefix, verify the exact hash, and add provenance. Product turns
+  accept one kernel action, which is what makes tool cells settled branch
+  points.
+- `web/` — notebook UI + kernel API. `session.py` (SandboxSession:
+  server-authoritative state), `app.py` (FastAPI:
   load/set/sample/refine/hunt/certify + Manim jobs + trace endpoints
-  (`/api/runs`, `/api/trace/{run}`, and per-step mpl renders) + pi control
-  routes for models/start/status/events/stop/comment/branch/stream), `static/`
+  `/api/runs`, `/api/trace/{run}`, per-step mpl renders + pi control routes
+  for models/start/status/events/stop/comment/branch/stream), `static/`
   (index.html + app.js = the reasoning notebook: cells stream the mind trace;
   cell images click through to an interactive three.js overlay;
   three.module.min.js and OrbitControls.js are vendored — keep them). The
-  frontend renders the same scene-graph JSON as Manim/mpl. UI convention: z
-  is up.
-- `src/simagent/answer.py` — answer.md / answer.tex / conjecture.lean. Verdict
-  wording is deliberate: certified vs numeric-candidate vs evidence. Never
-  upgrade the claim.
-- `src/simagent/llm.py` is the Claude formalizer (`messages.parse` structured
-  output, model `claude-opus-4-8`, adaptive thinking) with a
-  `validate_claim()` repair loop. Its closed-vocabulary prompt is generated
-  from registry `doc` strings.
-- `src/simagent/library/` contains eight bundled native Claims; the triangle
-  Claim is the LLM few-shot example. Three are known-answer tests for the
-  general layers: `sum-of-squares-vs-linear` (vocabulary) has margin
-  (x-1)²+(y-1)²-1, so the field view's zero-contour is that unit circle, the
-  algebraic echo of Thales; `orthocenter-in-triangle` (geometry kit) has a
-  margin over a DERIVED entity, which certification reaches only by replaying
-  the recipe exactly; `positive-quadratic` (proving) is the TRUE twin of
-  `sum-of-squares-vs-linear` with one constant changed, proved outright by a
-  Lean-checked sum-of-squares certificate rather than left as evidence.
+  frontend renders the same scene-graph JSON as Manim/mpl. UI convention: z is
+  up. The notebook supports selecting a cell or line, or raycast-picking a 3D
+  primitive, for comment or branch. Pi events stream at
+  `/api/agent/{run}/stream`.
 
-## v2 status (P0-P6 landed)
+## Rules that must not regress
 
-- `src/simagent/core/` is the seven-atom pure layer, enforced by
-  `tests/test_layering.py`; `views/` contains the eighth atom and analytical
-  output views. Dimension is declared by each Space. Views and registered
-  scene builders render that state; simplex scenes above d=3 explicitly
-  project to the first three coordinates and label the projection.
-- Bundled library = NATIVE CLAIMS (zero exec'd code): recipe + registry keys
-  (MEASURES/CONSTRAINTS/CERTIFIERS/LEANS/SCENES in core/claim.py,
-  CONSTRUCTORS in core/derive.py). spec.py is the deprecated legacy loader.
-- circumcenter-in-4simplex (ℝ⁴) is the dimension-agnostic known-answer test:
-  certified counterexample, verified_by="sandbox", explicit no-Lean-above-d3
-  notice (leangen raises "capped at d<=3"; answer.py prints the notice).
-- Closed agent tools are plan, look, sample, set_var, nudge, check, measure,
-  view, imagine, refine, hunt, exhaust, certify, sum_of_squares,
-  submit_lean_proof, construct, expect, and finish. TypeScript checks its
-  schemas against Python and exposes no pi coding tools or discovered
-  resources.
+- Only `proof.py` stamps `verified_by`. Views, measures, journals, UI code,
+  model prose, and user comments never mint a verdict.
+- Fail closed. See `tests/test_hardening.py`: lean_check binds axiom-freedom
+  to printed theorem NAMES and rejects sorry/admit/native_decide/'depends on
+  axioms'; run_exhaustive certifies only via an exact certifier or an
+  integer-exact domain, treats a raising check as incomplete, and rejects
+  empty or inverted domains; mechanized_proof stamps statement_review
+  'spec-generated-review-needed' unless `library.is_bundled(spec)`.
 - The model picks the proof method; the harness only hands it instruments.
   Calling an instrument IS the declaration (hunt = counterexample, construct +
   certify = construction, exhaust = exhaustion, sum_of_squares = direct); the
@@ -158,24 +196,15 @@ Always use `.venv/bin/...` explicitly — the shell PATH may resolve python to a
   and `proof.sos_proof` take a `notes` list and append the REASON at each
   refusal (tight/equality case, Gram matrix not PSD, odd degree, wrong
   verdict), because a dead end with no reason is one the model cannot act on.
-- `kernel_transport.py` is the provider-free JSONL kernel boundary; `agent/`
-  is the exact-pinned pi runtime and session service. Product turns accept one
-  kernel action, making tool cells settled branch points.
-- P7 multi-agent lanes, adopt, and merge remain roadmap work. The current pi
-  service permits one active controlled run at a time.
-
-## Conventions
-
-- Tests must stay offline (no API calls, no manim requirement).
 - New formalization vocabulary means a registry entry for a measure,
   constraint, constructor, certifier, Lean hook, or scene. Give it an accurate
-  `doc` string because `llm.py` generates the model's menu from those docs.
-- Lean toolchain IS installed (~/.elan, Lean 4.32.1); generated certificates
-  are kernel-checked. Lean *skeletons* (conjecture.lean) remain UNCHECKED.
-- Only `proof.py` stamps `verified_by`; views, measures, journals, and UI code
-  never mint proof verdicts.
-- for every code change, report before → after → impact on the project goal
-  and its users.
+  `doc` string, because `llm.py` generates the model's menu from those docs.
+- Tests must stay offline: no API calls, no manim requirement.
+
+## Roadmap
+
+P7 multi-agent lanes, adopt, and merge remain unbuilt. The pi service permits
+one active controlled run at a time.
 
 
 # Claude Instructions
@@ -312,3 +341,6 @@ Keep the final reply short:
 5. `Confidence: X/10`
 
 Omit any item that has nothing useful to say.
+
+For every code change, also report before → after → impact on the project goal
+and its users.
