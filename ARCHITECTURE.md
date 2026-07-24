@@ -1,5 +1,4 @@
 # SimAgent architecture
-THIS PROJECT IS ONLY HARNESS, thinking or any thought must come from the model itself, which must not be provided here
 
 SimAgent is an **agent harness for visualization-based math**: a small kernel
 with a strict responsibility split, where correctness beats features. Humans
@@ -57,6 +56,54 @@ kernel; they can display state but cannot mint verdicts.
 | **Python** | computation: sandbox, search, exact rationals (sympy) | trusted for *mechanized* methods only |
 | **Lean 4** | formulation + deductive verification (`decide`, core-only certificates) | the kernel is the root of trust |
 | **Manim** | visualization: the presentation renderer over the shared scene graph | no trust role — pictures explain, never prove |
+
+## Scope: which mathematics this harness serves
+
+SimAgent is not a general mathematics tool and was never built as one. Strip
+away the words and it is one machine: **a finite-dimensional configuration
+space, a scalar margin whose sign decides the claim, a picture of that space,
+and exact arithmetic to settle it.** That machine decides the scope, and the
+scope is fixed. This section is the standard; do not re-open it per feature.
+
+### The admission test
+
+A claim, a domain, or a proposed capability is in scope only if **all four**
+hold. Apply the test before writing code, not after.
+
+| # | Test | Fails when |
+|---|---|---|
+| 1 | **Finite configuration.** The free variables form a finite-dimensional Space that can be sampled and enumerated. | Stating the claim needs a function, a limit, or an infinite family. |
+| 2 | **Scalar margin.** One real number whose sign decides the property (`margin > 0 ⇔ holds`). | The property cannot be reduced to a single sign. |
+| 3 | **Renderable state.** The configuration can be drawn, or honestly projected with the projection labelled. | There is nothing to look at, so the visual thesis gives no advantage over a text-only tool. |
+| 4 | **Exactly checkable.** The margin evaluates in exact rational (or algebraic) arithmetic at a rational point. | It needs transcendental values or floating point only, so no verdict can rise above evidence. |
+
+Failing test 1 **only** because the object needs a Space that does not exist
+yet (a graph, a permutation, a polytope, a lattice) is an in-scope extension:
+build the Space. Failing test 2, 3 or 4 is permanent; no Space fixes it.
+
+### What that admits, and what it does not
+
+| status | domains |
+|---|---|
+| **Served today** | Geometry (points in ℝᵈ) · algebraic inequalities · linear algebra · optimization · bounded integer claims |
+| **In scope, Space not built yet** | Discrete and extremal geometry · combinatorics · graph theory |
+| **Out permanently** | Calculus, real and complex analysis · topology · abstract algebra · set theory · logic · cryptography · number theory beyond bounded claims |
+
+None of the seven Millennium problems is admissible, and no amount of building
+changes that: they live in analysis, topology, number theory and logic, which
+are infinite in exactly the way this machine is finite. Recording that here so
+nobody spends a session rediscovering it.
+
+### What the scope is aimed at
+
+One explicit finite object that settles a real question. Euler's sum of powers
+conjecture stood ~200 years and fell to a single line of numbers; Borsuk's
+stood 60 and fell to one finite point set; the Hirsch conjecture stood 53 and
+fell to one polytope. That is this machine's shape, and discrete and extremal
+geometry is where such questions are still open.
+
+Olympiad inequalities are the benchmark that earns credibility, not the
+destination.
 
 ## The proof kernel (`proof.py`)
 
@@ -222,3 +269,12 @@ agent/           TypeScript pi runtime and session service (exact-pinned)
 4. Certificates must stay core-Lean and `decide`-based unless a stronger,
    equally-checkable scheme replaces them repo-wide.
 5. Shells (CLI/REPL/web) may render state; they must not compute verdicts.
+6. Every change must serve a domain the scope section admits. Run the
+   four-part admission test first. A feature aimed at an out-of-scope domain is
+   rejected on scope, however good it is; the answer is not "later", it is no.
+7. The harness never does the model's thinking. Ask: *does this give the model
+   something it cannot get by thinking?* Capability, perception, verification
+   and memory are the harness's job. Strategy, insight and the choice of proof
+   method are the model's. An instrument may report its own limits (that is
+   information); it may not say which method to reach for next (that is
+   steering). Pinned by `test_harness_never_picks_the_method_for_the_model`.

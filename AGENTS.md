@@ -1,4 +1,5 @@
 # SimAgent — notes for the agent
+THIS PROJECT IS ONLY HARNESS, thinking or any thought must come from the model itself, which must not be provided here
 
 AGENTS.md and CLAUDE.md are the same file, kept byte-identical on purpose so
 every tool reads one source of truth. Edit one, copy it to the other.
@@ -14,8 +15,24 @@ core idea of sim agent is this :
 
 Other docs, so you do not duplicate them here: ARCHITECTURE.md (kernel design +
 contributor rules), README.md (what the project is, for a newcomer), GUIDE.md
-(how to use the tool), plan.md (the P0-P7 roadmap), agent/README.md (the pi
-package on its own terms).
+(how to use the tool), plan.md (the P0-P7 roadmap), list.md (the ranked work
+list), agent/README.md (the pi package on its own terms).
+
+**Two standards bind every change. Read ARCHITECTURE.md for both before you
+build anything.**
+
+- **Scope.** SimAgent serves one machine: a finite-dimensional configuration
+  space, a scalar margin whose sign decides the claim, a picture of it, and
+  exact arithmetic. A claim is admissible only if it passes all four parts of
+  the admission test there. Geometry, algebraic inequalities, linear algebra,
+  optimization and bounded integer claims are served today; discrete/extremal
+  geometry, combinatorics and graph theory need a new Space; analysis,
+  topology, abstract algebra, set theory, logic and cryptography are out
+  permanently. Work aimed at an out-of-scope domain is rejected on scope.
+- **Harness only.** Does this give the model something it cannot get by
+  thinking? Capability, perception, verification and memory are ours; strategy,
+  insight and the choice of proof method are the model's. An instrument reports
+  its own limits but never names the next method to try.
 
 ## Commands
 

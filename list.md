@@ -17,7 +17,7 @@ against what is interesting to build.
    the agent helps when the human is stuck, through a UI where the human can
    comment on any step.
 
-## Three decisions that scope every task below
+## Two decisions that scope every task below
 
 **1. SimAgent is only a harness. It never does the model's thinking.**
 
@@ -34,34 +34,10 @@ method to try next is steering and does not.
 `test_harness_never_picks_the_method_for_the_model` pins this: no failure note
 may contain advice.
 
-**2. The math domain is limited to what the architecture actually fits.**
-
-Strip away the words and SimAgent is one machine: a finite-dimensional
-configuration space, a scalar margin whose sign decides the claim, a picture of
-that space, and exact arithmetic to settle it. That is not a general math tool
-and never was.
-
-| In scope | Out of scope, permanently |
-|---|---|
-| Geometry (points in ℝᵈ) | Calculus, real and complex analysis |
-| Algebraic inequalities | Topology |
-| Linear algebra | Abstract algebra, set theory, logic |
-| Optimization | Cryptography |
-| Discrete and extremal geometry | Number theory beyond bounded integer claims |
-| Combinatorics and graph theory (needs a new Space type) | |
-
-None of the seven Millennium problems fits, and no amount of building changes
-that: they live in analysis, topology, number theory and logic, all of which are
-infinite in the way this machine is finite. That is a boundary, not a weakness.
-
-**3. The target is one explicit finite object that settles a real question.**
-
-Euler's sum of powers conjecture stood ~200 years and fell to one line of
-numbers. Borsuk's stood 60 years and fell to one finite point set. Hirsch's
-stood 53 years and fell to one polytope. That is this machine's shape.
-
-Use olympiad inequalities as the benchmark that earns credibility. Do not
-mistake the benchmark for the destination.
+**2. The math domain is fixed.** The standard, the four-part admission test,
+the served/not-yet/never lists and what the scope aims at all live in
+ARCHITECTURE.md under "Scope: which mathematics this harness serves". It is
+stated once, there. Every task below is inside it.
 
 ---
 
