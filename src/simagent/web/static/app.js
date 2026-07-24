@@ -34,6 +34,7 @@ const nb = {
   job: false,       // true when this page started the session (status endpoint exists)
   tracePoll: null,
   statusPoll: null,
+  commentTarget: null,
 };
 
 function stopPolling() {
@@ -50,6 +51,8 @@ function resetNotebook() {
   $('verdictWrap').style.display = 'none';
   $('statusWrap').style.display = 'none';
   $('btnStop').disabled = true;
+  closeComment();
+  if (ov?.open) close3d();
 }
 
 function nearBottom() {
@@ -75,6 +78,17 @@ function showStatement(spec) {
   $('statementWrap').style.display = 'block';
 }
 
+function markCommentTarget(node, target) {
+  node.classList.add('commentable');
+  node.dataset.commentTarget = JSON.stringify(target);
+  node.title = 'select text or double-click to comment';
+  node.addEventListener('dblclick', (event) => {
+    event.stopPropagation();
+    openComment(target);
+  });
+  return node;
+}
+
 function thoughtBlock(step) {
   const t = el('div', 'thought');
   const parts = [...(step.thought ?? [])];
@@ -82,15 +96,18 @@ function thoughtBlock(step) {
     parts.push({ kind: 'summary', text: step.args.summary });
   }
   if (!parts.length) return null;
-  for (const p of parts) {
+  parts.forEach((p, index) => {
     t.appendChild(el('span', 'kind', p.kind === 'thinking' ? 'thinking' : p.kind === 'summary' ? 'final summary (narrative)' : 'says'));
-    t.appendChild(el('span', p.kind === 'thinking' ? 'think' : 'say', p.text));
-  }
+    t.appendChild(markCommentTarget(
+      el('span', p.kind === 'thinking' ? 'think' : 'say', p.text),
+      { step: step.step, kind: 'thought', index, thought_kind: p.kind },
+    ));
+  });
   return t;
 }
 
 function actLine(step) {
-  const a = el('div', 'act mono');
+  const a = markCommentTarget(el('div', 'act mono'), { step: step.step, kind: 'act' });
   let argsText = '';
   if (step.tool === 'finish') argsText = '';
   else if (step.args && Object.keys(step.args).length) argsText = JSON.stringify(step.args);
@@ -101,6 +118,31 @@ function actLine(step) {
     a.appendChild(el('span', 'badge', `  ${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`));
   }
   return a;
+}
+
+function equationBlock(step) {
+  const lines = step.equation?.text ?? [];
+  if (!lines.length) return null;
+  const box = el('div', 'eq mono');
+  lines.forEach((line, index) => {
+    box.appendChild(markCommentTarget(
+      el('div', 'eqline', line),
+      { step: step.step, kind: 'equation', index },
+    ));
+  });
+  return box;
+}
+
+function cellActions(cell, step) {
+  const actions = el('div', 'cellactions');
+  const comment = el('button', 'mini', 'comment');
+  comment.onclick = () => openComment({ step: step.step, kind: 'cell' });
+  const branch = el('button', 'mini', 'branch');
+  branch.textContent = 'branch from here';
+  branch.title = 'stop this lane, replay this exact prefix, and continue in a new pi session';
+  branch.onclick = () => branchFromTarget({ step: step.step, kind: 'cell' });
+  actions.append(comment, branch);
+  cell.appendChild(actions);
 }
 
 function diffBlock(step) {
@@ -141,7 +183,10 @@ function imagineCell(step) {
   const inner = el('div');
   inner.appendChild(el('div', 'imnote', 'thought experiment — the real configuration is unchanged'));
   const ops = step.branch?.ops ?? step.args?.ops ?? [];
-  const act = el('div', 'act mono');
+  const act = markCommentTarget(
+    el('div', 'act mono'),
+    { step: step.step, kind: 'act' },
+  );
   act.textContent = `imagine(${ops.map((o) => `${o.op} ${o.target ?? o.name ?? ''}`).join(' · ')})`;
   inner.appendChild(act);
   if (step.image) {
@@ -169,10 +214,11 @@ function imagineCell(step) {
     }
     inner.appendChild(line);
   }
-  const eqLines = step.equation?.text ?? [];
-  if (eqLines.length) inner.appendChild(el('div', 'eq mono', eqLines.join('\n')));
+  const equations = equationBlock(step);
+  if (equations) inner.appendChild(equations);
   body.appendChild(inner);
   cell.appendChild(body);
+  cellActions(cell, step);
   $('cells').appendChild(cell);
   return cell;
 }
@@ -186,11 +232,20 @@ function annotationCell(step) {
   const th = thoughtBlock(step);
   if (th) body.appendChild(th);
   const box = el('div', 'planbox');
-  box.appendChild(el('div', 'pm', step.kind === 'user_comment' ? 'comment (steering — never verdict material)' : (step.kind ?? 'annotation')));
+  const label = step.kind === 'user_comment'
+    ? 'comment (steering only, never verdict material)'
+    : step.kind === 'provenance' ? 'branch provenance' : (step.kind ?? 'annotation');
+  box.appendChild(el('div', 'pm', label));
   if (step.text) box.appendChild(el('div', 'pi', step.text));
   if (step.target) box.appendChild(el('div', 'pi', `on: ${JSON.stringify(step.target)}`));
+  if (step.source) {
+    const source = step.source;
+    box.appendChild(el('span', 'chip pending',
+      `forked from ${source.run} step ${source.step} · ${String(source.stateHash ?? '').slice(0, 10)}`));
+  }
   body.appendChild(box);
   cell.appendChild(body);
+  cellActions(cell, step);
   $('cells').appendChild(cell);
   return cell;
 }
@@ -220,6 +275,7 @@ function appendStep(step) {
     }
     body.appendChild(box);
     cell.appendChild(body);
+    cellActions(cell, step);
     $('cells').appendChild(cell);
     return cell;
   }
@@ -276,8 +332,8 @@ function appendStep(step) {
     out.appendChild(img);
     out.appendChild(cap);
   }
-  const eqLines = step.equation?.text ?? [];
-  if (eqLines.length) out.appendChild(el('div', 'eq mono', eqLines.join('\n')));
+  const equations = equationBlock(step);
+  if (equations) out.appendChild(equations);
   const df = diffBlock(step);
   if (df) out.appendChild(df);
   const st = statBadge(step.check);
@@ -295,6 +351,7 @@ function appendStep(step) {
     body.appendChild(outCell);
   }
   cell.appendChild(body);
+  cellActions(cell, step);
   $('cells').appendChild(cell);
   return cell;
 }
@@ -379,8 +436,118 @@ async function openRun(run) {
   }
 }
 
+// ------------------------------------------------------ comments & branches --
+function openComment(target) {
+  if (!nb.run) return;
+  nb.commentTarget = target;
+  $('commentTarget').textContent = JSON.stringify(target);
+  $('commentText').value = '';
+  $('commentMsg').textContent = '';
+  $('commentPopover').style.display = 'block';
+  $('commentText').focus();
+}
+
+function closeComment() {
+  nb.commentTarget = null;
+  const popover = $('commentPopover');
+  if (popover) popover.style.display = 'none';
+}
+
+async function sendComment() {
+  if (!nb.run || !nb.commentTarget) return;
+  const text = $('commentText').value.trim();
+  if (!text) { $('commentMsg').textContent = 'type a comment first'; return; }
+  $('commentSend').disabled = true;
+  try {
+    await api(`/api/agent/${encodeURIComponent(nb.run)}/comment`, {
+      text,
+      target: nb.commentTarget,
+    });
+    $('commentMsg').textContent = 'queued for the next pi turn';
+    setTimeout(closeComment, 500);
+  } catch (e) {
+    $('commentMsg').textContent = `${e.message}. For a settled run, branch with this comment instead.`;
+  } finally {
+    $('commentSend').disabled = false;
+  }
+}
+
+async function branchFromTarget(target = nb.commentTarget) {
+  if (!nb.run || !target || target.step === undefined) return;
+  const sameTarget = nb.commentTarget && JSON.stringify(nb.commentTarget) === JSON.stringify(target);
+  const comment = sameTarget ? $('commentText').value.trim() : '';
+  $('commentBranch').disabled = true;
+  try {
+    const source = nb.run;
+    const result = await api(`/api/agent/${encodeURIComponent(source)}/branch`, {
+      step: target.step,
+      target,
+      comment: comment || null,
+    });
+    closeComment();
+    resetNotebook();
+    nb.run = result.run; nb.job = true;
+    history.replaceState(null, '', `?run=${encodeURIComponent(result.run)}`);
+    $('runMsg').textContent = `branch: ${result.run}`;
+    $('btnStop').disabled = false;
+    $('btnRestart').disabled = false;
+    setStatus(`branched from ${source} step ${target.step}`);
+    startJobPolling(result.run);
+    nb.tracePoll = setInterval(() => pullTrace().catch(() => {}), 900);
+    await pullTrace().catch(() => {});
+  } catch (e) {
+    const message = `branch failed: ${e.message}`;
+    $('commentMsg').textContent = message;
+    $('runMsg').textContent = message;
+  } finally {
+    $('commentBranch').disabled = false;
+  }
+}
+
+document.addEventListener('mouseup', () => {
+  const selection = window.getSelection();
+  const quote = selection?.toString().trim();
+  if (!quote || !selection?.anchorNode) return;
+  const parent = selection.anchorNode.nodeType === Node.ELEMENT_NODE
+    ? selection.anchorNode : selection.anchorNode.parentElement;
+  const selectable = parent?.closest?.('[data-comment-target]');
+  if (!selectable) return;
+  try {
+    openComment({ ...JSON.parse(selectable.dataset.commentTarget), quote });
+  } catch { /* stale DOM target */ }
+});
+
 // --------------------------------------------------------------- run agent --
 const TERMINAL = ['done', 'failed', 'stopped'];
+
+function startJobPolling(run) {
+  nb.statusPoll = setInterval(async () => {
+    try {
+      const st = await api(`/api/agent/${encodeURIComponent(run)}/status`);
+      if (!nb.done) {
+        const label = { running: 'agent is thinking…',
+                        stopping: 'stopping, letting the session wind down…',
+                        stopped: 'session stopped (kernel results so far were kept)',
+                        done: 'finalizing…',
+                        failed: 'session failed' }[st.status] ?? st.status;
+        setStatus(label, st.log);
+      }
+      if (st.status === 'failed') {
+        stopPolling();
+        setStatus(`session failed: ${st.error ?? 'unknown error'}. Check pi login/model configuration.`, st.log);
+        $('statusGut').classList.remove('pulse');
+      }
+      if (TERMINAL.includes(st.status)) {
+        clearInterval(nb.statusPoll); nb.statusPoll = null;
+        $('btnStop').disabled = true;
+        refreshRuns().catch(() => {});
+        setTimeout(() => {
+          if (!nb.done && nb.tracePoll) { clearInterval(nb.tracePoll); nb.tracePoll = null; }
+        }, 6000);
+      }
+    } catch { /* transient */ }
+  }, 900);
+}
 
 async function runSession(body) {
   $('btnRun').disabled = true;
@@ -393,37 +560,8 @@ async function runSession(body) {
     $('runMsg').textContent = `session: ${run}`;
     $('btnStop').disabled = false;
     $('btnRestart').disabled = false;
-    setStatus(body.conjecture ? 'formalizing your conjecture into a spec…' : 'agent session starting…');
-    // status poller (job state + log tail) and trace poller (cells)
-    nb.statusPoll = setInterval(async () => {
-      try {
-        const st = await api(`/api/agent/${encodeURIComponent(run)}/status`);
-        if (!nb.done) {
-          const label = { formalizing: 'formalizing your conjecture into a spec…',
-                          running: 'agent is thinking…',
-                          stopping: 'stopping — letting the session wind down…',
-                          stopped: 'session stopped (kernel results so far were kept)',
-                          done: 'finalizing…',
-                          failed: 'session failed' }[st.status] ?? st.status;
-          setStatus(label, st.log);
-        }
-        if (st.status === 'failed') {
-          stopPolling();
-          setStatus(`session failed: ${st.error ?? 'unknown error'}`
-            + ' — free-text conjectures need Claude API auth; bundled problems also run on the `claude` login (backend claude-code).', st.log);
-          $('statusGut').classList.remove('pulse');
-        }
-        if (TERMINAL.includes(st.status)) {
-          clearInterval(nb.statusPoll); nb.statusPoll = null;
-          $('btnStop').disabled = true;
-          refreshRuns().catch(() => {});
-          // a session stopped before any trace existed will never produce cells
-          setTimeout(() => {
-            if (!nb.done && nb.tracePoll) { clearInterval(nb.tracePoll); nb.tracePoll = null; }
-          }, 6000);
-        }
-      } catch { /* transient */ }
-    }, 1200);
+    setStatus(body.conjecture ? 'formalizing your conjecture into a spec…' : 'pi agent session starting…');
+    startJobPolling(run);
     nb.tracePoll = setInterval(() => pullTrace().catch(() => { /* trace not on disk yet */ }), 1400);
   } catch (e) {
     $('runMsg').textContent = e.status === 409 ? `busy: ${e.message}` : `error: ${e.message}`;
@@ -435,7 +573,15 @@ async function runSession(body) {
 function startAgent() {
   const problemId = $('problemSel').value;
   const conjecture = $('conjText').value.trim();
-  const body = { backend: $('backendSel').value || null, max_turns: parseInt($('maxTurns').value, 10) || 40 };
+  const body = {
+    max_turns: parseInt($('maxTurns').value, 10) || 40,
+    thinking_level: $('thinkingSel').value,
+  };
+  if ($('modelSel').value) {
+    const selected = JSON.parse($('modelSel').value);
+    body.provider = selected.provider;
+    body.model = selected.id;
+  }
   if (conjecture) body.conjecture = conjecture;
   else if (problemId) body.problem_id = problemId;
   else { $('runMsg').textContent = 'pick a problem or type a conjecture'; return; }
@@ -506,6 +652,14 @@ async function init() {
     o.textContent = `${p.title} [${p.quantifier}]`;
     psel.appendChild(o);
   }
+  const models = await api('/api/agent/models').catch(() => []);
+  const modelSel = $('modelSel');
+  for (const model of models.filter((candidate) => candidate.vision)) {
+    const option = document.createElement('option');
+    option.value = JSON.stringify({ provider: model.provider, id: model.id });
+    option.textContent = `${model.provider}/${model.id}`;
+    modelSel.appendChild(option);
+  }
   await refreshRuns().catch(() => {});
   const params = new URLSearchParams(location.search);
   const wanted = params.get('run');
@@ -524,6 +678,9 @@ $('btnRefresh').onclick = () => refreshRuns().catch(() => {});
 $('runSel').onchange = () => { if ($('runSel').value) openRun($('runSel').value).catch(() => {}); };
 $('conjText').addEventListener('input', () => { if ($('conjText').value.trim()) $('problemSel').value = ''; });
 $('problemSel').addEventListener('change', () => { if ($('problemSel').value) $('conjText').value = ''; });
+$('commentSend').onclick = () => sendComment();
+$('commentBranch').onclick = () => branchFromTarget();
+$('commentCancel').onclick = closeComment;
 
 // ------------------------------------------------------------- 3D overlay --
 // One lazy WebGL context; each open builds the clicked step's scene graph.
@@ -548,7 +705,30 @@ function ensureOverlay() {
   scene.add(grid);
   const group = new THREE.Group();
   scene.add(group);
-  ov = { renderer, scene, camera, controls, group, open: false };
+  const raycaster = new THREE.Raycaster();
+  raycaster.params.Line.threshold = 0.08;
+  ov = { renderer, scene, camera, controls, group, raycaster, open: false, step: null, pointerDown: null };
+  renderer.domElement.addEventListener('pointerdown', (event) => {
+    ov.pointerDown = { x: event.clientX, y: event.clientY };
+  });
+  renderer.domElement.addEventListener('pointerup', (event) => {
+    if (!ov.open || !ov.step || !ov.pointerDown) return;
+    const moved = Math.hypot(event.clientX - ov.pointerDown.x, event.clientY - ov.pointerDown.y);
+    ov.pointerDown = null;
+    if (moved > 5) return; // orbit drag, not a pick
+    const rect = renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(pointer, camera);
+    const hit = raycaster.intersectObjects(group.children, true)
+      .find((intersection) => intersection.object.userData.commentTarget);
+    if (!hit) return;
+    const primitive = hit.object.userData.commentTarget;
+    $('ovCap').textContent = `picked ${primitive.label ?? primitive.type} · add a comment or branch`;
+    openComment({ step: ov.step.step, kind: 'scene', primitive });
+  });
   const loop = () => {
     if (!ov.open) return;
     requestAnimationFrame(loop);
@@ -578,41 +758,61 @@ function clearOverlayGroup() {
   ov.group.clear();
 }
 
-const V = (p) => new THREE.Vector3(p[0], p[1], p[2]);
+const XYZ = (p) => [p[0], p[1], p[2] ?? 0];
+const V = (p) => new THREE.Vector3(...XYZ(p));
+
+function primitiveTarget(prim, extra = {}) {
+  return {
+    type: prim.type,
+    label: prim.name ?? prim.text ?? prim.type,
+    ...extra,
+  };
+}
 
 function buildOverlayScene(prims) {
   clearOverlayGroup();
   const labels = [];
   for (const prim of prims) {
     if (prim.type === 'points') {
-      for (const p of prim.coords) {
+      prim.coords.forEach((p, index) => {
         const m = new THREE.Mesh(
           new THREE.SphereGeometry(prim.radius ?? 0.05, 18, 14),
           new THREE.MeshBasicMaterial({ color: prim.color }),
         );
         m.position.copy(V(p));
+        m.userData.commentTarget = primitiveTarget(prim, { index, coords: XYZ(p) });
         ov.group.add(m);
-      }
+      });
     } else if (prim.type === 'segments') {
-      const pts = [];
-      for (const [a, b] of prim.pairs) pts.push(V(a), V(b));
-      const g = new THREE.BufferGeometry().setFromPoints(pts);
-      ov.group.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: prim.color })));
+      prim.pairs.forEach(([a, b], index) => {
+        const g = new THREE.BufferGeometry().setFromPoints([V(a), V(b)]);
+        const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: prim.color }));
+        line.userData.commentTarget = primitiveTarget(prim, {
+          index,
+          coords: [XYZ(a), XYZ(b)],
+        });
+        ov.group.add(line);
+      });
     } else if (prim.type === 'polygon' || prim.type === 'mesh') {
       const positions = [];
       if (prim.type === 'polygon') {
         const c = prim.coords;
-        for (let i = 1; i + 1 < c.length; i++) positions.push(...c[0], ...c[i], ...c[i + 1]);
+        for (let i = 1; i + 1 < c.length; i++) positions.push(...XYZ(c[0]), ...XYZ(c[i]), ...XYZ(c[i + 1]));
       } else {
-        for (const f of prim.faces) for (const idx of f) positions.push(...prim.vertices[idx]);
+        for (const f of prim.faces) for (const idx of f) positions.push(...XYZ(prim.vertices[idx]));
       }
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
       g.computeVertexNormals();
-      ov.group.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
         color: prim.color, transparent: true, opacity: prim.opacity ?? 0.3,
         side: THREE.DoubleSide, depthWrite: false,
-      })));
+      }));
+      mesh.userData.commentTarget = primitiveTarget(prim, {
+        coords: prim.type === 'polygon' ? prim.coords.map(XYZ) : undefined,
+        vertices: prim.type === 'mesh' ? prim.vertices.map(XYZ) : undefined,
+      });
+      ov.group.add(mesh);
     } else if (prim.type === 'sphere') {
       const m = new THREE.Mesh(
         new THREE.SphereGeometry(prim.radius, 40, 24),
@@ -622,6 +822,10 @@ function buildOverlayScene(prims) {
         }),
       );
       m.position.copy(V(prim.center));
+      m.userData.commentTarget = primitiveTarget(prim, {
+        center: XYZ(prim.center),
+        radius: prim.radius,
+      });
       ov.group.add(m);
     } else if (prim.type === 'label') {
       labels.push(prim.text);
@@ -637,6 +841,7 @@ function open3d(step) {
     return; // no WebGL — the PNG is already on the page
   }
   const labels = buildOverlayScene(step.scene ?? []);
+  ov.step = step;
   $('ovCap').textContent =
     `step ${step.step} · ${step.tool ?? 'narrative'}` + (labels.length ? ` — ${labels.join(' · ')}` : '');
   $('overlay').style.display = 'block';
@@ -658,11 +863,15 @@ function open3d(step) {
 function close3d() {
   if (!ov) return;
   ov.open = false;
+  ov.step = null;
   $('overlay').style.display = 'none';
 }
 
 $('ovClose').onclick = close3d;
 $('overlay').addEventListener('click', (e) => { if (e.target === $('overlay')) close3d(); });
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close3d(); });
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('commentPopover').style.display !== 'none') closeComment();
+  else if (e.key === 'Escape') close3d();
+});
 
 init().catch((e) => setStatus(`init failed: ${e.message}`));

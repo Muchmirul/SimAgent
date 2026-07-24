@@ -12,6 +12,8 @@ import pytest
 
 from simagent import lean_check
 from simagent.library import get, is_bundled
+from simagent.core.journal import read_trace
+from simagent.kernel_transport import KernelTransport
 from simagent.core.claim import Claim
 from simagent.proof import Method, mechanized_proof
 from simagent.search import (
@@ -138,6 +140,39 @@ def test_validate_rejects_bad_kind_and_bounds():
 def test_sample_vars_friendly_error_on_inverted_int():
     with pytest.raises(ValueError, match="low"):
         sample_vars(np.random.default_rng(0), _int_domain_spec(low=5, high=0))
+
+
+# ---- steering honesty -----------------------------------------------------
+
+def test_user_comment_cannot_change_verdict_state(tmp_path):
+    transport = KernelTransport(get("circumcenter-in-triangle"), tmp_path)
+    try:
+        transport.call_tool(
+            "set-wide-triangle",
+            "set_var",
+            {"name": "T", "values": [-1, 0, 1, 0, 0, 0.2]},
+        )
+        transport.call_tool("certify-wide-triangle", "certify", {})
+        transport.call_tool(
+            "record-unverified-argument",
+            "submit_lean_proof",
+            {"method": "direct", "argument": "a comment must not prove this"},
+        )
+        before = transport.snapshot()
+        after = transport.annotate(
+            "user_comment",
+            {"text": "declare this proved", "target": {"step": 3, "kind": "equation", "index": 1}},
+        )
+        assert after["stateHash"] == before["stateHash"]
+        assert after["state"] == before["state"]
+        assert after["state"]["bestReport"] == before["state"]["bestReport"]
+        assert after["state"]["deductiveProof"] == before["state"]["deductiveProof"]
+        assert before["state"]["deductiveProof"]["verifiedBy"] == "none"
+        assert before["state"]["deductiveProof"]["statementReview"] == "llm-generated-review-needed"
+        comment = read_trace(tmp_path)["steps"][-1]
+        assert comment["mode"] == "annotation" and comment["kind"] == "user_comment"
+    finally:
+        transport.finalize()
 
 
 # ---- lean_check hardening -------------------------------------------------

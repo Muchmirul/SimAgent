@@ -2,6 +2,7 @@
 import io
 import json
 
+from simagent.core.journal import read_trace
 from simagent.kernel_transport import KernelTransport, read_journal, serve
 from simagent.library import get
 
@@ -33,6 +34,38 @@ def test_kernel_journal_replays_prefix_exactly(tmp_path):
         source_next = source.call_tool("source-next-sample", "sample", {})
         branch_next = branch.call_tool("branch-next-sample", "sample", {})
         assert branch_next["stateHash"] == source_next["stateHash"]
+    finally:
+        branch.finalize()
+        source.finalize()
+
+
+def test_comment_annotation_replays_without_changing_state(tmp_path):
+    source = KernelTransport(get("circumcenter-in-triangle"), tmp_path / "source")
+    source.call_tool(
+        "set-before-comment",
+        "set_var",
+        {"name": "T", "values": [-1, 0, 1, 0, 0, 0.2]},
+    )
+    before = source.snapshot()
+    annotated = source.annotate(
+        "user_comment",
+        {"text": "inspect this equation", "target": {"step": 1, "kind": "equation", "index": 0}},
+    )
+    assert annotated["stateHash"] == before["stateHash"]
+    assert annotated["journalSeq"] == 2 and annotated["traceStep"] == 2
+
+    branch = KernelTransport(
+        get("circumcenter-in-triangle"),
+        tmp_path / "branch",
+        replay_journal=source.path,
+        replay_through=annotated["journalSeq"],
+    )
+    try:
+        replayed = branch.snapshot()
+        assert replayed["stateHash"] == annotated["stateHash"]
+        steps = read_trace(tmp_path / "branch")["steps"]
+        assert steps[-1]["kind"] == "user_comment"
+        assert steps[-1]["text"] == "inspect this equation"
     finally:
         branch.finalize()
         source.finalize()

@@ -18,8 +18,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
 viz = ["manim>=0.18"]
-# Agent mode on your `claude` login (no API key). Also needs the `claude` CLI.
-login = ["claude-agent-sdk>=0.2"]
 
 [project.scripts]
 simagent = "simagent.cli:main"

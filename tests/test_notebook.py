@@ -1,16 +1,13 @@
 """Notebook-facing web API: per-step scene renders, kernel outcome on the
 trace, and the background agent job runner (with an injected fake runner —
 offline, no LLM)."""
-import threading
-import time
-from types import SimpleNamespace
-
 import pytest
 
 fastapi_testclient = pytest.importorskip("fastapi.testclient")
 
 from simagent.agent import AgentRun  # noqa: E402
 from simagent.library import get  # noqa: E402
+from simagent.pi_agent import PiAgentError  # noqa: E402
 from simagent.web import create_app  # noqa: E402
 
 
@@ -27,8 +24,8 @@ def traced_run(tmp_path):
     return tmp_path
 
 
-def make_client(root, agent_runner=None):
-    app = create_app(out_root=str(root / "web"), runs_root=str(root), agent_runner=agent_runner)
+def make_client(root, agent_client=None):
+    app = create_app(out_root=str(root / "web"), runs_root=str(root), agent_client=agent_client)
     return fastapi_testclient.TestClient(app)
 
 
@@ -52,54 +49,104 @@ def test_trace_carries_kernel_outcome(traced_run):
         assert tr["verdict"] and "DISPROVED" in tr["verdict"]
 
 
-def _wait_status(client, run, wanted, timeout=90.0):
-    """Generous timeout: a certified run's finalize() includes a real Lean
-    kernel check, which can take ~10s cold."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        st = client.get(f"/api/agent/{run}/status").json()
-        if st["status"] in wanted:
-            return st
-        time.sleep(0.05)
-    raise AssertionError(f"status never reached {wanted}")
+class FakePiControl:
+    def __init__(self):
+        self.run = "agent-circumcenter-in-triangle"
+        self.status_value = "running"
+        self.calls = []
+
+    def models(self):
+        return [{"provider": "fake", "id": "vision", "vision": True}]
+
+    def start(self, **kwargs):
+        self.calls.append(("start", kwargs))
+        return {"run": self.run}
+
+    def status(self, run):
+        if run != self.run:
+            raise PiAgentError("NOT_FOUND", "unknown agent job")
+        return {
+            "run": run,
+            "status": self.status_value,
+            "title": "triangle",
+            "turns": 1,
+            "log": ["[tool] check"],
+            "error": None,
+            "proof": None,
+            "checkpoints": [],
+        }
+
+    def events(self, run, after=0):
+        self.status(run)
+        return {"events": [{"seq": 1, "type": "started", "data": {}}] if after < 1 else [], "total": 1}
+
+    def stop(self, run):
+        self.status(run)
+        if self.status_value != "running":
+            raise PiAgentError("CONFLICT", f"session is not running (status: {self.status_value})")
+        self.status_value = "stopping"
+        self.calls.append(("stop", run))
+        return {"run": run, "status": "stopping"}
+
+    def comment(self, run, text, target):
+        self.status(run)
+        self.calls.append(("comment", text, target))
+        return {"run": run, "status": "queued"}
+
+    def branch(self, run, step, **kwargs):
+        self.status(run)
+        self.calls.append(("branch", step, kwargs))
+        return {"run": f"branch-{run}-step-{step}"}
 
 
-def test_agent_start_runs_injected_runner_and_streams_trace(tmp_path):
-    def fake_runner(spec, out_dir, backend=None, max_turns=40, log=print, on_run=None):
-        run = AgentRun(spec, out_dir)
-        if on_run:
-            on_run(run)
-        run.note_thought("scripted session")
-        run.dispatch("set_var", {"name": "T", "values": [-1, 0, 1, 0, 0, 0.2]})
-        run.dispatch("certify", {})
-        run.dispatch("finish", {"summary": "done"})
-        proof, _report, _artifacts = run.finalize()
-        log("[fake] finished")
-        return SimpleNamespace(proof=proof)
+def test_agent_routes_delegate_to_pi_control(tmp_path):
+    control = FakePiControl()
+    with make_client(tmp_path, agent_client=control) as client:
+        assert client.get("/api/agent/models").json()[0]["vision"] is True
+        started = client.post(
+            "/api/agent/start",
+            json={"problem_id": "circumcenter-in-triangle", "max_turns": 17},
+        )
+        assert started.status_code == 200 and started.json()["run"] == control.run
+        assert control.calls[0][0] == "start"
+        assert control.calls[0][1]["max_turns"] == 17
+        assert client.get(f"/api/agent/{control.run}/status").json()["status"] == "running"
+        assert client.get(f"/api/agent/{control.run}/events").json()["total"] == 1
 
-    with make_client(tmp_path, agent_runner=fake_runner) as client:
-        r = client.post("/api/agent/start", json={"problem_id": "circumcenter-in-triangle"})
-        assert r.status_code == 200
-        run = r.json()["run"]
-        assert run.startswith("agent-circumcenter-in-triangle")
-        st = _wait_status(client, run, {"done", "failed"})
-        assert st["status"] == "done"
-        assert st["proof"]["method"] == "counterexample"
-        assert any("[fake] finished" in l for l in st["log"])
-        tr = client.get(f"/api/trace/{run}").json()
-        assert tr["done"] is True and tr["total"] == 3
-        assert tr["proof"]["method"] == "counterexample"
+        target = {"step": 1, "kind": "equation", "index": 0}
+        comment = client.post(
+            f"/api/agent/{control.run}/comment",
+            json={"text": "check the sign", "target": target},
+        )
+        assert comment.status_code == 200 and comment.json()["status"] == "queued"
+        assert ("comment", "check the sign", target) in control.calls
+
+        branch = client.post(
+            f"/api/agent/{control.run}/branch",
+            json={"step": 1, "comment": "try again", "target": target},
+        )
+        assert branch.status_code == 200
+        assert branch.json()["run"].startswith("branch-")
+
+        stopped = client.post(f"/api/agent/{control.run}/stop")
+        assert stopped.status_code == 200 and stopped.json()["status"] == "stopping"
+        assert client.post(f"/api/agent/{control.run}/stop").status_code == 409
 
 
-def test_agent_start_is_single_flight_and_validates(tmp_path):
-    gate = threading.Event()
+def test_pi_event_websocket_bridges_controller_events(tmp_path):
+    control = FakePiControl()
+    control.status_value = "done"
+    with make_client(tmp_path, agent_client=control) as client:
+        with client.websocket_connect(f"/api/agent/{control.run}/stream") as websocket:
+            first = websocket.receive_json()
+            settled = websocket.receive_json()
+        assert first["type"] == "started"
+        assert settled["type"] == "settled" and settled["data"]["status"] == "done"
 
-    def slow_runner(spec, out_dir, backend=None, max_turns=40, log=print, on_run=None):
-        AgentRun(spec, out_dir).finalize()
-        assert gate.wait(8)
-        return SimpleNamespace(proof=None)
 
-    with make_client(tmp_path, agent_runner=slow_runner) as client:
+def test_agent_routes_validate_and_map_unknown_jobs(tmp_path):
+    control = FakePiControl()
+    with make_client(tmp_path, agent_client=control) as client:
         assert client.post("/api/agent/start", json={}).status_code == 422
         assert (
             client.post(
@@ -109,58 +156,27 @@ def test_agent_start_is_single_flight_and_validates(tmp_path):
             == 422
         )
         assert client.post("/api/agent/start", json={"problem_id": "nope"}).status_code == 404
-
-        first = client.post("/api/agent/start", json={"problem_id": "circumcenter-in-triangle"})
-        assert first.status_code == 200
-        busy = client.post("/api/agent/start", json={"problem_id": "sum-of-odds-square"})
-        assert busy.status_code == 409
-        gate.set()
-        st = _wait_status(client, first.json()["run"], {"done"})
-        assert st["proof"] is None
-        # a second run may start now and gets a fresh, non-clobbering name
-        gate.set()
-        second = client.post("/api/agent/start", json={"problem_id": "circumcenter-in-triangle"})
-        assert second.status_code == 200
-        assert second.json()["run"] != first.json()["run"]
-        _wait_status(client, second.json()["run"], {"done"})
-
-
-def test_unknown_agent_job_is_404(tmp_path):
-    with make_client(tmp_path) as client:
         assert client.get("/api/agent/nope/status").status_code == 404
         assert client.post("/api/agent/nope/stop").status_code == 404
+        assert client.post(
+            f"/api/agent/{control.run}/comment", json={"text": "  ", "target": {}}
+        ).status_code == 422
+        assert client.post(
+            f"/api/agent/{control.run}/branch", json={"step": -1}
+        ).status_code == 422
 
 
-def test_stop_ends_a_running_session_and_frees_the_slot(tmp_path):
-    def stoppable_runner(spec, out_dir, backend=None, max_turns=40, log=print, on_run=None):
-        run = AgentRun(spec, out_dir)
-        if on_run:
-            on_run(run)  # registers the handle; a pre-arrived stop applies here
-        deadline = time.monotonic() + 20
-        while not run.stop_requested and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert run.stop_requested, "runner should have been stopped, not timed out"
-        run.dispatch("finish", {"summary": "wound down"})
-        run.finalize()
-        return SimpleNamespace(proof=None)
-
-    with make_client(tmp_path, agent_runner=stoppable_runner) as client:
-        run = client.post(
-            "/api/agent/start", json={"problem_id": "circumcenter-in-triangle"}
-        ).json()["run"]
-        r = client.post(f"/api/agent/{run}/stop")
-        assert r.status_code == 200 and r.json()["status"] == "stopping"
-        st = _wait_status(client, run, {"stopped", "done", "failed"})
-        assert st["status"] == "stopped"
-        # stopping twice is a clean 409, not a crash
-        assert client.post(f"/api/agent/{run}/stop").status_code == 409
-        # the trace was finalized (end marker) and the slot is free again
-        tr = client.get(f"/api/trace/{run}").json()
-        assert tr["done"] is True
-        second = client.post("/api/agent/start", json={"problem_id": "circumcenter-in-triangle"})
-        assert second.status_code == 200
-        client.post(f"/api/agent/{second.json()['run']}/stop")
-        _wait_status(client, second.json()["run"], {"stopped"})
+def test_p6_notebook_assets_offer_comment_branch_and_scene_pick(tmp_path):
+    with make_client(tmp_path, agent_client=FakePiControl()) as client:
+        index = client.get("/").text
+        script = client.get("/static/app.js").text
+        assert "commentPopover" in index and "branch with comment" in index
+        assert "modelSel" in index and "/api/agent/models" in script
+        assert "thinkingSel" in index and "thinking_level" in script
+        assert "backendSel" not in index and "claude-code" not in index
+        assert "/comment`" in script and "/branch`" in script
+        assert "THREE.Raycaster" in script and "kind: 'scene'" in script
+        assert "branch provenance" in script
 
 
 def test_agent_run_stop_blocks_tools_but_allows_finish(tmp_path):

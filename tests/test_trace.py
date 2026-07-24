@@ -3,30 +3,11 @@
 API for replay/live-follow. All offline — scripted fake model, no manim."""
 import json
 from pathlib import Path
-from types import SimpleNamespace
-
 import pytest
 
-from simagent.agent import AgentRun, run_agent
+from simagent.agent import AgentRun
 from simagent.library import get
 from simagent.trace import TRACE_FILE, diff_vars, equation_of_state, read_trace
-
-
-def turn(*tool_calls, text=None, thinking=None):
-    content = []
-    if thinking:
-        content.append(SimpleNamespace(type="thinking", thinking=thinking))
-    if text:
-        content.append(SimpleNamespace(type="text", text=text))
-    for i, (name, args) in enumerate(tool_calls):
-        content.append(SimpleNamespace(type="tool_use", id=f"tu_{name}_{i}", name=name, input=args))
-    return SimpleNamespace(stop_reason="tool_use" if tool_calls else "end_turn", content=content)
-
-
-class FakeClient:
-    def __init__(self, turns):
-        self._turns = list(turns)
-        self.messages = SimpleNamespace(create=lambda **kw: self._turns.pop(0))
 
 
 def read_steps(out_dir):
@@ -114,21 +95,6 @@ def test_trace_look_saves_image_and_errors_are_steps(tmp_path):
     assert steps[0]["image"] == "looks/look_001.png"
     assert (tmp_path / steps[0]["image"]).exists()
     assert steps[1]["tool"] == "exhaust" and steps[1]["error"] is True
-
-
-def test_run_agent_feeds_thought_and_thinking_to_trace(tmp_path):
-    client = FakeClient(
-        [
-            turn(("look", {}), text="Let me see the world.", thinking="hmm, circumcenters…"),
-            turn(("finish", {"summary": "stuck"})),
-        ]
-    )
-    run_agent(get("circumcenter-in-triangle"), tmp_path, client=client, log=lambda *_: None)
-    steps, events = read_steps(tmp_path)
-    assert events, "finalize must write the end marker"
-    kinds = [(t["kind"], t["text"]) for t in steps[0]["thought"]]
-    assert ("thinking", "hmm, circumcenters…") in kinds
-    assert ("text", "Let me see the world.") in kinds
 
 
 # -- pure helpers -------------------------------------------------------------

@@ -16,6 +16,7 @@ export interface KernelDescription {
   protocolVersion: number;
   journalVersion: number;
   specId: string;
+  title: string;
   systemPrompt: string;
   taskPrompt: string;
   tools: KernelToolDescription[];
@@ -24,6 +25,7 @@ export interface KernelDescription {
 
 export interface KernelSnapshot {
   journalSeq: number;
+  traceStep: number;
   journalPath: string;
   state: Record<string, unknown>;
   stateHash: string;
@@ -36,6 +38,7 @@ export interface KernelToolResult {
   isError: boolean;
   finished: boolean;
   journalSeq: number;
+  traceStep: number;
   journalPath: string;
   state: Record<string, unknown>;
   stateHash: string;
@@ -61,7 +64,8 @@ interface PendingRequest {
 }
 
 export interface KernelClientOptions {
-  problemId: string;
+  problemId?: string;
+  specPath?: string;
   outDir: string;
   repoRoot?: string;
   pythonPath?: string;
@@ -126,14 +130,13 @@ export class KernelClient {
   static async start(options: KernelClientOptions): Promise<KernelClient> {
     const repoRoot = resolve(options.repoRoot ?? defaultRepoRoot());
     const pythonPath = resolve(options.pythonPath ?? join(repoRoot, ".venv/bin/python"));
-    const args = [
-      "-m",
-      "simagent.kernel_transport",
-      "--problem-id",
-      options.problemId,
-      "--out-dir",
-      resolve(options.outDir),
-    ];
+    if ((options.problemId === undefined) === (options.specPath === undefined)) {
+      throw new Error("provide exactly one of problemId or specPath");
+    }
+    const args = ["-m", "simagent.kernel_transport"];
+    if (options.problemId !== undefined) args.push("--problem-id", options.problemId);
+    if (options.specPath !== undefined) args.push("--spec", resolve(options.specPath));
+    args.push("--out-dir", resolve(options.outDir));
     if (options.replayJournal !== undefined) {
       args.push("--replay-journal", resolve(options.replayJournal));
     }
@@ -260,6 +263,7 @@ export class KernelClient {
     }
     this.tip = {
       journalSeq: result.journalSeq,
+      traceStep: result.traceStep,
       journalPath: result.journalPath,
       state: result.state,
       stateHash: result.stateHash,
@@ -270,6 +274,37 @@ export class KernelClient {
 
   async snapshot(): Promise<KernelSnapshot> {
     const snapshot = await this.request<KernelSnapshot>({ op: "snapshot" });
+    this.tip = snapshot;
+    return snapshot;
+  }
+
+  async noteThought(
+    text: string,
+    kind: "text" | "thinking" | "user" = "text",
+  ): Promise<KernelSnapshot> {
+    const snapshot = await this.request<KernelSnapshot>({ op: "note", text, kind });
+    this.tip = snapshot;
+    return snapshot;
+  }
+
+  async annotate(
+    kind: "user_comment" | "provenance",
+    payload: Record<string, unknown>,
+  ): Promise<KernelSnapshot> {
+    // A user can comment while a tool is still running. Queue a snapshot after
+    // that tool, then the annotation, so the comparison is never against a
+    // stale pre-tool tip. Python independently enforces the same invariant.
+    const before = await this.snapshot();
+    const snapshot = await this.request<KernelSnapshot>({ op: "annotate", kind, payload });
+    if (snapshot.stateHash !== before.stateHash) {
+      throw new Error(`${kind} annotation changed kernel state`);
+    }
+    this.tip = snapshot;
+    return snapshot;
+  }
+
+  async stop(summary = "session stopped by the user"): Promise<KernelSnapshot> {
+    const snapshot = await this.request<KernelSnapshot>({ op: "stop", summary });
     this.tip = snapshot;
     return snapshot;
   }

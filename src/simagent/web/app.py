@@ -1,21 +1,24 @@
 """FastAPI backend for the SimAgent reasoning notebook.
 
 Single-user local tool. The frontend is a notebook: a math problem goes in as
-text (or a bundled problem id), an embodied agent session runs in a background
-thread, and the UI streams the mind trace — thought + act + rendered scene +
-equation translation + diff per step — as notebook cells. The server stays
+text (or a bundled problem id), the TypeScript pi service runs an embodied
+agent session, and the UI streams the mind trace — thought + act + rendered
+scene + equation translation + diff per step — as notebook cells. FastAPI stays
 the kernel authority: it also exposes the sandbox session API (load/set/
 sample/refine/hunt/certify) and Manim render jobs; the UI cannot mint
 verdicts, it only displays kernel state.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -60,16 +63,39 @@ class ManimBody(BaseModel):
 class AgentStartBody(BaseModel):
     problem_id: str | None = None
     conjecture: str | None = None
-    backend: str | None = None  # None/auto -> resolve_backend
+    provider: str | None = None
+    model: str | None = None
+    thinking_level: Literal[
+        "off", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "medium"
     max_turns: int = 40
+
+
+class AgentCommentBody(BaseModel):
+    text: str
+    target: dict
+
+
+class AgentBranchBody(BaseModel):
+    step: int
+    comment: str | None = None
+    target: dict | None = None
 
 
 def create_app(
     out_root: str = "runs/web",
     runs_root: str | None = None,
-    agent_runner=None,
+    agent_client=None,
 ) -> FastAPI:
-    app = FastAPI(title="SimAgent sandbox")
+    owned_agent_client = None
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        if owned_agent_client is not None:
+            await asyncio.to_thread(owned_agent_client.close)
+
+    app = FastAPI(title="SimAgent sandbox", lifespan=lifespan)
     sessions: dict[str, SandboxSession] = {}
     jobs: dict[str, dict] = {}
     lock = threading.Lock()
@@ -300,140 +326,134 @@ def create_app(
             raise HTTPException(404, "no such file in this run")
         return FileResponse(f)
 
-    # -- agent sessions: the notebook's "Run" button -------------------------
-    # One background thread runs formalize (for free-text conjectures) and the
-    # embodied agent loop; the notebook streams the growing trace. One session
-    # at a time — this is a single-user local tool.
+    # -- pi agent control: TypeScript owns model sessions and branches --------
 
-    agent_jobs: dict[str, dict] = {}
-    agent_active: dict[str, str | None] = {"run": None}
+    def control():
+        nonlocal owned_agent_client
+        if agent_client is not None:
+            return agent_client
+        if owned_agent_client is None:
+            from ..pi_agent import PiAgentClient
 
-    def _default_runner(spec, out_dir, backend=None, max_turns=40, log=print, on_run=None):
-        from .. import agent as agent_mod
+            owned_agent_client = PiAgentClient(traces_root)
+        return owned_agent_client
 
-        return agent_mod.run(
-            spec, out_dir, backend=backend, max_turns=max_turns, log=log, on_run=on_run
-        )
+    def control_error(exc):
+        from ..pi_agent import PiAgentError
 
-    runner = agent_runner or _default_runner
+        if not isinstance(exc, PiAgentError):
+            raise exc
+        status = {
+            "NOT_FOUND": 404,
+            "BUSY": 409,
+            "CONFLICT": 409,
+            "VALIDATION": 422,
+            "NOT_BUILT": 503,
+            "NO_NODE": 503,
+        }.get(exc.code, 500)
+        raise HTTPException(status, str(exc)) from exc
+
+    @app.get("/api/agent/models")
+    def agent_models() -> list[dict]:
+        try:
+            return control().models()
+        except Exception as exc:
+            control_error(exc)
 
     @app.post("/api/agent/start")
     def agent_start(body: AgentStartBody) -> dict:
-        if bool(body.problem_id) == bool(body.conjecture is not None and body.conjecture.strip()):
+        conjecture = body.conjecture.strip() if body.conjecture else ""
+        if bool(body.problem_id) == bool(conjecture):
             raise HTTPException(422, "give exactly one of problem_id or conjecture")
-        spec = None
+        spec_path = None
         if body.problem_id:
             try:
-                spec = get(body.problem_id)
-            except KeyError as e:
-                raise HTTPException(404, str(e)) from e
-        max_turns = max(1, min(body.max_turns, 200))
-        with lock:
-            active = agent_active["run"]
-            if active and agent_jobs.get(active, {}).get("status") in ("formalizing", "running"):
-                raise HTTPException(409, f"an agent session is already running ({active})")
-            base = f"agent-{spec.id if spec else 'conjecture'}"
-            run, n = base, 1
-            while (traces_root / run).exists() or run in agent_jobs:
-                n += 1
-                run = f"{base}-{n}"
-            agent_jobs[run] = {
-                "status": "formalizing" if spec is None else "running",
-                "title": spec.title if spec else None,
-                "log": [],
-                "error": None,
-                "proof": None,
-                "cancel": False,      # stop requested (works even before the loop exists)
-                "agent_run": None,    # live AgentRun handle, for cooperative stop
-            }
-            agent_active["run"] = run
+                get(body.problem_id)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+        else:
+            from ..llm import formalize
 
-        def job_log(msg) -> None:
-            with lock:
-                tail = agent_jobs[run]["log"]
-                tail.append(str(msg)[:300])
-                del tail[:-30]
-
-        def register_run(agent_run) -> None:
-            # Close the stop-vs-registration race: if stop arrived before the
-            # loop existed, apply it the moment the handle appears.
-            with lock:
-                agent_jobs[run]["agent_run"] = agent_run
-                cancelled = agent_jobs[run]["cancel"]
-            if cancelled:
-                agent_run.stop()
-
-        def work() -> None:
-            try:
-                the_spec = spec
-                if the_spec is None:
-                    from ..llm import formalize
-
-                    the_spec = formalize(body.conjecture, log=job_log)
-                    with lock:
-                        if agent_jobs[run]["cancel"]:
-                            agent_jobs[run]["status"] = "stopped"
-                            return
-                        agent_jobs[run]["status"] = "running"
-                        agent_jobs[run]["title"] = the_spec.title
-                result = runner(
-                    the_spec,
-                    traces_root / run,
-                    backend=body.backend,
-                    max_turns=max_turns,
-                    log=job_log,
-                    on_run=register_run,
-                )
-                proof = getattr(result, "proof", None)
-                with lock:
-                    agent_jobs[run]["status"] = "stopped" if agent_jobs[run]["cancel"] else "done"
-                    if proof is not None:
-                        agent_jobs[run]["proof"] = {
-                            "method": proof.method.value,
-                            "verified_by": proof.verified_by,
-                        }
-            except Exception as e:  # noqa: BLE001 - job errors surface via status
-                with lock:
-                    agent_jobs[run]["status"] = "failed"
-                    agent_jobs[run]["error"] = f"{type(e).__name__}: {e}"
-            finally:
-                with lock:
-                    if agent_active["run"] == run:
-                        agent_active["run"] = None
-
-        threading.Thread(target=work, daemon=True).start()
-        return {"run": run}
+            spec = formalize(conjecture)
+            spec_dir = traces_root / ".formalized"
+            spec_dir.mkdir(parents=True, exist_ok=True)
+            spec_path = spec_dir / f"{spec.id}-{uuid.uuid4().hex[:8]}.json"
+            spec.save(spec_path)
+        try:
+            return control().start(
+                problem_id=body.problem_id,
+                spec_path=spec_path,
+                provider=body.provider,
+                model=body.model,
+                thinking_level=body.thinking_level,
+                max_turns=max(1, min(body.max_turns, 200)),
+            )
+        except Exception as exc:  # transport errors map to stable HTTP statuses
+            control_error(exc)
 
     @app.post("/api/agent/{run}/stop")
     def agent_stop(run: str) -> dict:
-        """Cooperative stop: the loop winds down and finalize still records
-        what the kernel established. Only sessions this server started can be
-        stopped (CLI runs belong to their own process)."""
-        with lock:
-            job = agent_jobs.get(run)
-            if job is None:
-                raise HTTPException(404, "unknown agent job")
-            if job["status"] not in ("formalizing", "running"):
-                raise HTTPException(409, f"session is not running (status: {job['status']})")
-            job["cancel"] = True
-            job["status"] = "stopping"
-            agent_run = job["agent_run"]
-        if agent_run is not None:
-            agent_run.stop()
-        return {"run": run, "status": "stopping"}
-
-    _STATUS_KEYS = ("status", "title", "log", "error", "proof")
+        try:
+            return control().stop(run)
+        except Exception as exc:
+            control_error(exc)
 
     @app.get("/api/agent/{run}/status")
     def agent_status(run: str) -> dict:
-        with lock:
-            job = agent_jobs.get(run)
-            if job is None:
-                raise HTTPException(404, "unknown agent job")
-            return {
-                "run": run,
-                **{k: (list(job[k]) if isinstance(job[k], list) else job[k]) for k in _STATUS_KEYS},
-            }
+        try:
+            return control().status(run)
+        except Exception as exc:
+            control_error(exc)
+
+    @app.get("/api/agent/{run}/events")
+    def agent_events(run: str, after: int = 0) -> dict:
+        try:
+            return control().events(run, after=max(0, after))
+        except Exception as exc:
+            control_error(exc)
+
+    @app.post("/api/agent/{run}/comment")
+    def agent_comment(run: str, body: AgentCommentBody) -> dict:
+        if not body.text.strip():
+            raise HTTPException(422, "comment text must be non-empty")
+        try:
+            return control().comment(run, body.text.strip(), body.target)
+        except Exception as exc:
+            control_error(exc)
+
+    @app.post("/api/agent/{run}/branch")
+    def agent_branch(run: str, body: AgentBranchBody) -> dict:
+        if body.step < 0:
+            raise HTTPException(422, "branch step must be non-negative")
+        try:
+            return control().branch(
+                run,
+                body.step,
+                comment=body.comment,
+                target=body.target,
+            )
+        except Exception as exc:
+            control_error(exc)
+
+    @app.websocket("/api/agent/{run}/stream")
+    async def agent_stream(websocket: WebSocket, run: str):
+        await websocket.accept()
+        after = 0
+        try:
+            while True:
+                event_batch = await asyncio.to_thread(control().events, run, after)
+                for event in event_batch["events"]:
+                    await websocket.send_json(event)
+                after = event_batch["total"]
+                status = await asyncio.to_thread(control().status, run)
+                if status["status"] in ("done", "failed", "stopped"):
+                    await websocket.send_json({"type": "settled", "data": status})
+                    return
+                await asyncio.sleep(0.35)
+        except WebSocketDisconnect:
+            return
+        except Exception as exc:
+            await websocket.send_json({"type": "error", "data": {"message": str(exc)}})
 
     @app.get("/")
     def index():

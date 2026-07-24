@@ -134,53 +134,37 @@ Proof + report ──▶ answer.md / answer.tex / conjecture.lean / proof.json
 scene graph ──▶ matplotlib preview │ Manim still/video │ three.js live view
 ```
 
-## Agent mode (`agent.py`)
+## Agent mode (pi control plane)
 
-The embodiment layer: an LLM runs a tool loop against one `SandboxSession` —
-`look` (rendered scene as an image), movement tools, the search machinery,
-`certify`, `exhaust`, and `submit_lean_proof`. Three rules keep it honest:
+The TypeScript package under `agent/` owns provider authentication, model
+turns, event streaming, steering, and pi conversation sessions. It starts one
+private Python `kernel_transport.py` process per run. The Python process owns
+`AgentRun`, `SandboxSession`, exact checks, Lean checks, trace output, and
+finalization. Pi transports messages but cannot stamp a verdict.
 
-1. The loop is manual and small; every tool result is transcribed
-   (`transcript.jsonl`) and every look is saved (`looks/`).
-2. Tool handlers only call kernel functions; they cannot stamp verdicts.
-   Session state is kept-best (a later weaker search or failed Lean attempt
-   never downgrades an earlier decisive one), and no tool runs after `finish`.
-3. `finalize()` builds the outcome from kernel state (certified reports,
-   kernel-checked Lean). The model's `finish` summary is stored as narrative,
-   clearly labeled, and never merged into the verdict.
+Product runs expose only the closed SimAgent tools and disable pi's coding
+tools and resource discovery. Tool execution is sequential. One kernel action
+is accepted per model turn, so each tool cell ends at a settled pi checkpoint.
+A branch copies the pi conversation prefix, replays the matching Python
+journal prefix, and rejects unless the state hash agrees exactly.
 
-**The mind trace** (`trace.py`). The sandbox is the agent's mind, and the
-trace makes it visible: every tool step appends one JSON object to
-`trace.jsonl` — the model's *thought* (spoken text + raw thinking) that
-preceded the act, the act (tool + args), the full scene graph after it, the
-kernel-side check, the harness's **equation translation** of the new state,
-and a **diff** against the previous step (which rows moved, margin before →
-after). The model thinks in the scene; equations are the harness's
-translation of each mental picture into symbols, not the medium of thought.
-The agent can also *declare* its line of attack (`plan`: one of the ten
-methods + a one-line idea, re-declared on strategy switches). Declarations
-are recorded in the trace as intent and shown as approach cells; the proof's
-`method` is still assigned only by `proof.py` from what was mechanically
-established — the notebook's verdict cell shows both ("declared: X →
-established: Y"), and divergence is information, not error.
+There are two correlated records:
 
-The web frontend is a **reasoning notebook** over this trace: the problem is
-the input cell, each step streams in as a cell (thought → act → picture →
-equations → diff), and clicking a cell opens the interactive 3D scene. It
-replays finished runs or follows live ones (`/api/runs`,
-`/api/trace/<run>?after=N`, polled; `/api/agent/start` launches sessions in a
-background thread). A trace is narrative plus reproducible state; it is
-never verdict material — the verdict cell only mirrors `proof.json`.
+1. The pi session stores conversation, thinking, tool bracketing, steering,
+   and the branch tree.
+2. `kernel-journal.jsonl` and `trace.jsonl` store the reproducible world,
+   pictures, equations, diffs, annotations, and proof candidates.
 
-Two interchangeable backends drive the same `AgentRun` state machine:
+A targeted comment is written to the trace as `user_comment` and delivered
+through `session.steer()` after the current tool batch. The annotation
+operation asserts that the complete kernel state hash is unchanged. Branches
+add a provenance annotation containing source run, step, journal sequence,
+and hash. Neither annotation kind is verdict material.
 
-- **`api`** — a manual tool loop over the Anthropic SDK (API key or
-  `ant auth login` profile).
-- **`claude-code`** — the Claude Agent SDK on the user's `claude` login (a
-  subscription; no API key). Tools are exposed as an in-process MCP server;
-  `look` images travel as MCP image content. Claude Code's built-in tools are
-  disabled so the session stays inside the sandbox. `resolve_backend()` picks
-  `api` when a key is present, else `claude-code`.
+The reasoning notebook polls the kernel trace and can also consume pi events
+through `/api/agent/<run>/stream`. A user can select a cell, thought, action,
+or equation line, or raycast-pick a 3D primitive, then comment or branch from
+that state. The verdict cell still reads only `proof.json` and `answer.md`.
 
 ## Files
 
@@ -210,18 +194,16 @@ src/simagent/
   library/       bundled native Claims — zero exec'd code; known-answer tests
                  incl. circumcenter-in-4simplex (the dimension-agnostic gate)
   visualize/     mpl.py (always-on PNG), manim_gen.py (generated ThreeDScene)
-  agent.py       embodied LLM loop (vision + tools) over one SandboxSession;
-                 tools: plan look sample set_var nudge check measure view
-                 imagine construct expect refine hunt exhaust certify
-                 submit_lean_proof finish
-  kernel_transport.py  JSONL subprocess bridge for the pi runtime (P0):
-                 hash-verified journal-prefix replay; toolCallId correlation
+  agent.py       kernel-side tool state over one SandboxSession; no provider loop
+  kernel_transport.py  strict JSONL kernel bridge: tools, annotations, stop,
+                 hash-verified prefix replay, toolCallId correlation
+  pi_agent.py    thin client for the TypeScript pi control service
   spec.py        LEGACY exec'd-code contract (deprecated; loader only)
   trace.py       shim → core.journal
   play.py, web/  shells: terminal REPL and the reasoning-notebook UI over the
                  same kernel (trace replay/live-follow via /api/runs,
                  /api/trace; agent sessions via /api/agent/start)
-agent/           TypeScript pi runtime spike (exact-pinned @earendil-works/*)
+agent/           TypeScript pi runtime and session service (exact-pinned)
 ```
 
 ## Rules for contributors (human or LLM)

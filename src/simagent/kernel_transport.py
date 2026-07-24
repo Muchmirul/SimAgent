@@ -11,13 +11,15 @@ Protocol (one response for every request)::
     {"id":"1", "op":"describe"}
     {"id":"2", "op":"call", "toolCallId":"call-7",
      "name":"look", "args":{}}
-    {"id":"3", "op":"snapshot"}
-    {"id":"4", "op":"finalize"}
+    {"id":"3", "op":"annotate", "kind":"user_comment", "payload":{...}}
+    {"id":"4", "op":"stop", "summary":"stopped by the user"}
+    {"id":"5", "op":"snapshot"}
+    {"id":"6", "op":"finalize"}
 
-The append-only ``kernel-journal.jsonl`` stores every accepted or rejected
-call, its unchanged Pi ``toolCallId``, and a hash of the resulting kernel
-state.  A new transport can replay a journal prefix; replay fails closed if
-any state hash differs from the source entry.
+The append-only ``kernel-journal.jsonl`` stores every tool call, thought,
+annotation, and stop boundary. Tool calls keep the unchanged Pi ``toolCallId``;
+every event carries a hash of the resulting kernel state. A new transport can
+replay a journal prefix, and replay fails closed if any state hash differs.
 """
 from __future__ import annotations
 
@@ -37,7 +39,10 @@ from .library import get as get_bundled
 from .spec import ProblemSpec
 
 JOURNAL_FILE = "kernel-journal.jsonl"
-JOURNAL_VERSION = 1
+JOURNAL_VERSION = 2
+
+_ANNOTATION_KINDS = frozenset({"user_comment", "provenance"})
+_THOUGHT_KINDS = frozenset({"text", "thinking", "user"})
 
 
 class KernelReplayError(RuntimeError):
@@ -150,8 +155,8 @@ def _transport_content(content: str | list[dict]) -> list[dict[str, Any]]:
     return blocks
 
 
-def read_journal(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Read a complete journal, ignoring only a malformed trailing partial line."""
+def _read_records(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read a journal, ignoring only a malformed trailing partial line."""
     records: list[dict[str, Any]] = []
     lines = Path(path).read_text().splitlines()
     for index, line in enumerate(lines):
@@ -162,7 +167,15 @@ def read_journal(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 raise KernelReplayError(f"malformed journal line {index + 1}") from None
     if not records or records[0].get("event") != "header":
         raise KernelReplayError("journal has no valid header")
-    return records[0], [r for r in records[1:] if r.get("event") == "call"]
+    return records[0], [
+        r for r in records[1:] if r.get("event") in {"call", "note", "annotation", "stop"}
+    ]
+
+
+def read_journal(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Compatibility reader returning only model tool calls."""
+    header, records = _read_records(path)
+    return header, [record for record in records if record.get("event") == "call"]
 
 
 class KernelTransport:
@@ -213,9 +226,10 @@ class KernelTransport:
 
     def describe(self) -> dict[str, Any]:
         return {
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "journalVersion": JOURNAL_VERSION,
             "specId": self.run.spec.id,
+            "title": self.run.spec.title,
             "systemPrompt": SYSTEM,
             "taskPrompt": _task_prompt(self.run.spec),
             "tools": TOOLS,
@@ -226,6 +240,7 @@ class KernelTransport:
         state = _state(self.run)
         return {
             "journalSeq": self.journal_seq,
+            "traceStep": self.run.trace.steps,
             "journalPath": str(self.path.resolve()),
             "state": state,
             "stateHash": _state_hash(state),
@@ -266,13 +281,87 @@ class KernelTransport:
             "isError": is_error,
             "finished": self.run.finished,
             "journalSeq": self.journal_seq,
+            "traceStep": self.run.trace.steps,
             "journalPath": str(self.path.resolve()),
             "state": state,
             "stateHash": digest,
         }
 
+    def note_thought(self, text: str, kind: str = "text") -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("kernel transport is finalized")
+        if kind not in _THOUGHT_KINDS:
+            raise ValueError(f"unsupported thought kind {kind!r}")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("thought text must be non-empty")
+        self.run.note_thought(text, kind=kind)
+        self.journal_seq += 1
+        state = _state(self.run)
+        record = {
+            "event": "note",
+            "seq": self.journal_seq,
+            "kind": kind,
+            "text": text,
+            "stateHash": _state_hash(state),
+            "traceStep": self.run.trace.steps,
+        }
+        self._write(record)
+        return self.snapshot()
+
+    def annotate(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Journal narrative metadata without changing proof or world state."""
+        if self._closed:
+            raise RuntimeError("kernel transport is finalized")
+        if kind not in _ANNOTATION_KINDS:
+            raise ValueError(f"unsupported annotation kind {kind!r}")
+        if not isinstance(payload, dict):
+            raise ValueError("annotation payload must be an object")
+        if kind == "user_comment":
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("user_comment text must be non-empty")
+            if not isinstance(payload.get("target"), dict):
+                raise ValueError("user_comment target must be an object")
+        before = self.snapshot()
+        entry = self.run.trace.annotate(kind, payload)
+        self.journal_seq += 1
+        after = self.snapshot()
+        if after["stateHash"] != before["stateHash"]:
+            raise RuntimeError("annotation changed kernel state")
+        self._write(
+            {
+                "event": "annotation",
+                "seq": self.journal_seq,
+                "kind": kind,
+                "payload": payload,
+                "traceStep": entry["step"],
+                "stateHash": after["stateHash"],
+            }
+        )
+        return after
+
+    def stop(self, summary: str = "session stopped by the user") -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("kernel transport is finalized")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("stop summary must be non-empty")
+        self.run.stop()
+        self.run.summary = summary
+        self.journal_seq += 1
+        state = _state(self.run)
+        self._write(
+            {
+                "event": "stop",
+                "seq": self.journal_seq,
+                "summary": summary,
+                "stateHash": _state_hash(state),
+                "traceStep": self.run.trace.steps,
+            }
+        )
+        return self.snapshot()
+
     def _replay(self, source: str | Path, through: int | None) -> None:
-        header, calls = read_journal(source)
+        header, records = _read_records(source)
         if header.get("version") != JOURNAL_VERSION:
             raise KernelReplayError(
                 f"unsupported journal version {header.get('version')!r}; expected {JOURNAL_VERSION}"
@@ -285,32 +374,46 @@ class KernelTransport:
         if initial != header.get("stateHash"):
             raise KernelReplayError("initial kernel state does not match journal header")
 
-        max_seq = max((int(entry.get("seq", 0)) for entry in calls), default=0)
+        max_seq = max((int(entry.get("seq", 0)) for entry in records), default=0)
         limit = max_seq if through is None else through
         if not isinstance(limit, int) or limit < 0 or limit > max_seq:
             raise KernelReplayError(f"invalid replay prefix {limit!r}; journal tip is {max_seq}")
         expected_seq = 1
-        for entry in calls:
+        for entry in records:
             seq = int(entry.get("seq", 0))
             if seq > limit:
                 break
             if seq != expected_seq:
                 raise KernelReplayError(
-                    f"journal call sequence is not contiguous at {seq}; expected {expected_seq}"
+                    f"journal sequence is not contiguous at {seq}; expected {expected_seq}"
                 )
-            result = self.call_tool(
-                str(entry.get("toolCallId") or ""),
-                str(entry.get("tool") or ""),
-                dict(entry.get("args") or {}),
-            )
-            if result["isError"] != bool(entry.get("isError")):
-                raise KernelReplayError(f"replay error status diverged at call {seq}")
+            event = entry.get("event")
+            if event == "call":
+                result = self.call_tool(
+                    str(entry.get("toolCallId") or ""),
+                    str(entry.get("tool") or ""),
+                    dict(entry.get("args") or {}),
+                )
+                if result["isError"] != bool(entry.get("isError")):
+                    raise KernelReplayError(f"replay error status diverged at event {seq}")
+            elif event == "note":
+                result = self.note_thought(
+                    str(entry.get("text") or ""), str(entry.get("kind") or "")
+                )
+            elif event == "annotation":
+                result = self.annotate(
+                    str(entry.get("kind") or ""), dict(entry.get("payload") or {})
+                )
+            elif event == "stop":
+                result = self.stop(str(entry.get("summary") or ""))
+            else:  # pragma: no cover - _read_records filters this closed vocabulary
+                raise KernelReplayError(f"unsupported journal event {event!r}")
             if result["stateHash"] != entry.get("stateHash"):
-                raise KernelReplayError(f"replay state diverged at call {seq}")
+                raise KernelReplayError(f"replay state diverged at event {seq}")
             expected_seq += 1
         if self.journal_seq != limit:
             raise KernelReplayError(
-                f"replayed {self.journal_seq} calls but prefix requested {limit}"
+                f"replayed {self.journal_seq} events but prefix requested {limit}"
             )
 
     def finalize(self) -> dict[str, Any]:
@@ -323,6 +426,7 @@ class KernelTransport:
             "report": _jsonable(report),
             "artifacts": _jsonable(artifacts),
             "journalSeq": self.journal_seq,
+            "traceStep": self.run.trace.steps,
             "journalPath": str(self.path.resolve()),
             "state": state,
             "stateHash": _state_hash(state),
@@ -359,6 +463,18 @@ def serve(transport: KernelTransport, stdin: TextIO = sys.stdin, stdout: TextIO 
                 elif op == "call":
                     result = transport.call_tool(
                         request.get("toolCallId"), request.get("name"), request.get("args") or {}
+                    )
+                elif op == "note":
+                    result = transport.note_thought(
+                        request.get("text"), request.get("kind") or "text"
+                    )
+                elif op == "annotate":
+                    result = transport.annotate(
+                        request.get("kind"), request.get("payload") or {}
+                    )
+                elif op == "stop":
+                    result = transport.stop(
+                        request.get("summary") or "session stopped by the user"
                     )
                 elif op == "finalize":
                     result = transport.finalize()

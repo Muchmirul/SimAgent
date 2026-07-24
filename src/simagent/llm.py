@@ -12,7 +12,6 @@ profile automatically — no key handling here.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 from typing import Literal, Optional
@@ -31,30 +30,6 @@ from .core.claim import (
 from .core.derive import CONSTRUCTORS
 
 DEFAULT_MODEL = os.environ.get("SIMAGENT_MODEL", "claude-opus-4-8")
-
-
-def resolve_backend(backend: str | None = None) -> str:
-    """Pick the agent backend: 'api' (Anthropic SDK key/profile) or
-    'claude-code' (Claude Agent SDK on the user's `claude` login).
-
-    Order: explicit arg > SIMAGENT_BACKEND env > auto. Auto prefers the API
-    when a key/profile is present, else claude-code if the SDK + `claude` CLI
-    are available.
-    """
-    import shutil
-
-    choice = (backend or os.environ.get("SIMAGENT_BACKEND") or "auto").lower()
-    if choice in ("api", "claude-code"):
-        return choice
-    have_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    have_cc = (
-        importlib.util.find_spec("claude_agent_sdk") is not None and shutil.which("claude") is not None
-    )
-    if have_key:
-        return "api"
-    if have_cc:
-        return "claude-code"
-    return "api"  # let the API backend surface a clear auth error
 
 
 # -- the structured-output schema (mirrors claim/1 JSON) -----------------------

@@ -4,6 +4,10 @@ Date: 2026-07-24
 Branch: `feat/simagent-v2-p0-pi-spike`  
 Scope: **P0 only**; no P1 core migration was started.
 
+> Historical note: P6 has now landed. The pi runtime became the production
+> control plane, and the temporary Python API and Claude Code agent backends
+> described as fallbacks below were removed.
+
 ## Executive result
 
 **Recommendation: GO for P1.**

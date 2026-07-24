@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-import { createSimAgentRuntime } from "./runtime.js";
+import { createSimAgentRuntime, type CreateSimAgentRuntimeOptions } from "./runtime.js";
 
 function parseOptions(argv: string[]): Map<string, string> {
   const result = new Map<string, string>();
@@ -52,6 +52,73 @@ async function authCheck(argv: string[]): Promise<number> {
   return result.configured && result.vision ? 0 : 2;
 }
 
+async function runSession(argv: string[]): Promise<number> {
+  const options = parseOptions(argv);
+  const problemId = options.get("problem-id");
+  const specPath = options.get("spec");
+  if ((problemId === undefined) === (specPath === undefined)) {
+    throw new Error("provide exactly one of --problem-id or --spec");
+  }
+  const outDir = resolve(required(options, "out-dir"));
+  const provider = options.get("provider");
+  const modelId = options.get("model");
+  if ((provider === undefined) !== (modelId === undefined)) {
+    throw new Error("--provider and --model must be given together");
+  }
+  const runtimeOptions: CreateSimAgentRuntimeOptions = {
+    outDir,
+    thinkingLevel: (options.get("thinking") ?? "medium") as NonNullable<CreateSimAgentRuntimeOptions["thinkingLevel"]>,
+    singleToolPerTurn: true,
+  };
+  if (problemId !== undefined) runtimeOptions.problemId = problemId;
+  if (specPath !== undefined) runtimeOptions.specPath = resolve(specPath);
+  if (provider !== undefined && modelId !== undefined) {
+    const selected = await resolveStandardModel(provider, modelId);
+    if (!selected.auth) throw new Error(`no Pi authentication found for ${provider}`);
+    runtimeOptions.modelRuntime = selected.modelRuntime;
+    runtimeOptions.model = selected.model;
+  }
+  const runtime = await createSimAgentRuntime(runtimeOptions);
+  const maxTurns = Math.max(1, Math.min(Number(options.get("max-turns") ?? 40), 200));
+  let turns = 0;
+  let limited = false;
+  let limitStop: Promise<void> | undefined;
+  runtime.session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      process.stdout.write(event.assistantMessageEvent.delta);
+    } else if (event.type === "turn_end") {
+      turns += 1;
+      if (turns >= maxTurns && !limited) {
+        limited = true;
+        limitStop = runtime.stop(`maximum turn count reached (${maxTurns})`).catch(() => undefined);
+      }
+    }
+  });
+  try {
+    await runtime.promptTask();
+  } catch (error) {
+    if (!limited) throw error;
+  }
+  if (limitStop) await limitStop;
+  process.stdout.write("\n");
+  const finalized = await runtime.dispose();
+  const proof = finalized.proof as Record<string, unknown> | null;
+  if (proof) {
+    const rawMethod = String(proof.method);
+    const method = rawMethod.startsWith("Method.")
+      ? rawMethod.slice("Method.".length).toLowerCase()
+      : rawMethod;
+    process.stdout.write(
+      `Proof: ${method} - verified by ${String(proof.verified_by ?? proof.verifiedBy)}\n`,
+    );
+  } else {
+    process.stdout.write("No kernel-grade result was established in this session.\n");
+  }
+  process.stdout.write(`Run dir: ${outDir}\n`);
+  process.stdout.write(`Pi session: ${runtime.session.sessionFile ?? "in-memory"}\n`);
+  return 0;
+}
+
 async function smoke(argv: string[]): Promise<number> {
   const options = parseOptions(argv);
   const provider = required(options, "provider");
@@ -96,10 +163,12 @@ async function smoke(argv: string[]): Promise<number> {
 async function main(): Promise<number> {
   const [command, ...argv] = process.argv.slice(2);
   if (command === "auth-check") return authCheck(argv);
+  if (command === "run") return runSession(argv);
   if (command === "smoke") return smoke(argv);
   process.stderr.write(
     "usage:\n" +
       "  cli.js auth-check --provider NAME --model ID\n" +
+      "  cli.js run (--problem-id ID | --spec PATH) --out-dir PATH [--provider NAME --model ID]\n" +
       "  cli.js smoke --provider NAME --model ID [--problem-id ID] [--out-dir PATH]\n",
   );
   return 2;

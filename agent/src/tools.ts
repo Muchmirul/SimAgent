@@ -17,6 +17,9 @@ const METHODS = [
   "infinite_descent",
 ] as const;
 
+const VIEW_KINDS = ["field", "sweep", "trajectory"] as const;
+const EXPECT_RELATIONS = ["<", "<=", ">", ">=", "holds", "fails"] as const;
+
 const Empty = () => Type.Object({}, { additionalProperties: false });
 
 const TOOL_SCHEMAS: Record<string, TSchema> = {
@@ -46,6 +49,26 @@ const TOOL_SCHEMAS: Record<string, TSchema> = {
     { additionalProperties: false },
   ),
   check: Empty(),
+  measure: Empty(),
+  view: Type.Object(
+    {
+      kind: StringEnum(VIEW_KINDS),
+      var: Type.Optional(Type.String()),
+      row: Type.Optional(Type.Integer()),
+      xi: Type.Optional(Type.Integer()),
+      yi: Type.Optional(Type.Integer()),
+      coord: Type.Optional(Type.Integer()),
+      resolution: Type.Optional(Type.Integer()),
+    },
+    { additionalProperties: false },
+  ),
+  imagine: Type.Object(
+    {
+      ops: Type.Array(Type.Unsafe({ type: "object" })),
+      look: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
   refine: Type.Object({ steps: Type.Optional(Type.Integer()) }, { additionalProperties: false }),
   hunt: Type.Object({ trials: Type.Optional(Type.Integer()) }, { additionalProperties: false }),
   exhaust: Empty(),
@@ -58,6 +81,22 @@ const TOOL_SCHEMAS: Record<string, TSchema> = {
     },
     { additionalProperties: false },
   ),
+  construct: Type.Object(
+    {
+      name: Type.String(),
+      ctor: Type.String(),
+      args: Type.Array(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
+  expect: Type.Object(
+    {
+      relation: StringEnum(EXPECT_RELATIONS),
+      value: Type.Optional(Type.Number()),
+      note: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
   finish: Type.Object({ summary: Type.String() }, { additionalProperties: false }),
 };
 
@@ -67,6 +106,7 @@ export interface KernelToolDetails {
   kernel: {
     toolCallId: string;
     journalSeq: number;
+    traceStep: number;
     stateHash: string;
     isError: boolean;
     finished: boolean;
@@ -140,6 +180,7 @@ export function createKernelTools(
             kernel: {
               toolCallId: result.toolCallId,
               journalSeq: result.journalSeq,
+              traceStep: result.traceStep,
               stateHash: result.stateHash,
               isError: result.isError,
               finished: result.finished,

@@ -1,32 +1,20 @@
-"""Agent mode: an LLM lives in the sandbox.
+"""Kernel-side embodied tool state for pi-managed agent sessions.
 
-The model gets eyes and hands: `look` returns the rendered 3D scene as an
-image (vision), the other tools move points, run the search machinery, and
-submit Lean. The harness stays the authority — the model's narrative is saved
-as narrative, but the final verdict is built only from kernel state
-(certified reports and kernel-checked Lean), exactly as in pipeline runs.
-
-Two interchangeable backends drive the same AgentRun tool state machine:
-  "api"          — a deliberately small manual tool loop over the Anthropic
-                   SDK (needs an API key or `ant auth login` profile).
-  "claude-code"  — the Claude Agent SDK, which authenticates with the user's
-                   existing `claude` login (subscription; no API key). Tools
-                   are exposed as an in-process MCP server; `look` images pass
-                   through as MCP image content.
+This module owns the sandbox actions, trace, proof candidates, and finalization.
+It has no provider or model loop. The thin TypeScript package under ``agent/``
+drives these tools through ``kernel_transport.py``; only Python proof machinery
+can produce verdict artifacts.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 from . import answer as answer_mod
 from . import proof as proof_mod
-from .llm import DEFAULT_MODEL, resolve_backend
 from .proof import Method
 from .search import SearchReport
 from .spec import ProblemSpec
@@ -75,8 +63,9 @@ The harness is the authority, and it is strict:
 - Your prose is recorded but proves nothing. Never claim more than the
   machinery verified.
 
-Work economically: look, form a hypothesis, test it. When the matter is
-settled (or you are honestly stuck), call `finish` with a summary."""
+Work economically: look, form a hypothesis, test it. Call one tool per turn so
+every notebook cell is a safe branch point. When the matter is settled (or you
+are honestly stuck), call `finish` with a summary."""
 
 TOOLS = [
     {
@@ -258,17 +247,6 @@ TOOLS = [
 ]
 
 
-@dataclass
-class AgentResult:
-    spec: ProblemSpec
-    out_dir: str
-    proof: proof_mod.Proof | None
-    report: SearchReport | None
-    turns: int
-    summary: str
-    artifacts: dict[str, str] = field(default_factory=dict)
-
-
 def _task_prompt(spec: ProblemSpec) -> str:
     return (
         f"Conjecture: {spec.conjecture}\n\nLaTeX: {spec.latex}\n"
@@ -309,7 +287,7 @@ def _report_from_certify(spec: ProblemSpec, session: SandboxSession, c: dict) ->
 
 
 class AgentRun:
-    """The tool state machine shared by both backends. Cannot stamp verdicts."""
+    """Provider-free tool state behind the pi transport. Cannot stamp verdicts."""
 
     def __init__(self, spec: ProblemSpec, out_dir):
         self.spec = spec
@@ -349,7 +327,7 @@ class AgentRun:
 
     def stop(self) -> None:
         """Cooperative cancel (threads can't be killed): every further tool
-        call errors, both backend loops wind down, and finalize still records
+        call errors, the pi controller winds down, and finalize still records
         whatever the kernel established before the stop."""
         self.stop_requested = True
         self.finished = True
@@ -724,216 +702,3 @@ class AgentRun:
         # (otherwise a live notebook can read "done" and miss the verdict).
         self.trace.close()
         return proof, report, artifacts
-
-
-def _block_get(block, key, default=None):
-    if isinstance(block, dict):
-        return block.get(key, default)
-    return getattr(block, key, default)
-
-
-def run_agent(
-    spec: ProblemSpec,
-    out_dir,
-    client=None,
-    model: str | None = None,
-    max_turns: int = 40,
-    log=print,
-    on_run=None,
-) -> AgentResult:
-    """The "api" backend: a small manual tool loop. `client` is injectable for
-    tests; `on_run` receives the AgentRun right after construction (the web
-    job runner uses it to expose cooperative stop)."""
-    if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
-    model = model or DEFAULT_MODEL
-    run = AgentRun(spec, out_dir)
-    if on_run is not None:
-        on_run(run)
-    messages: list[dict] = [{"role": "user", "content": _task_prompt(spec)}]
-
-    turns = 0
-    for turns in range(1, max_turns + 1):
-        if run.finished:  # e.g. stopped from outside between turns
-            break
-        resp = client.messages.create(
-            model=model,
-            max_tokens=16000,
-            thinking={"type": "adaptive"},
-            system=SYSTEM,
-            tools=TOOLS,
-            messages=messages,
-        )
-        if getattr(resp, "stop_reason", None) == "refusal":
-            raise RuntimeError("model refused the agent task")
-        messages.append({"role": "assistant", "content": resp.content})
-        tool_uses = [b for b in resp.content if _block_get(b, "type") == "tool_use"]
-        for b in resp.content:  # feed narrative + thinking to the mind trace, in order
-            if _block_get(b, "type") == "thinking" and _block_get(b, "thinking"):
-                run.note_thought(_block_get(b, "thinking"), kind="thinking")
-            elif _block_get(b, "type") == "text" and _block_get(b, "text"):
-                run.note_thought(_block_get(b, "text"), kind="text")
-                log(f"[agent] {_block_get(b, 'text')[:300]}")
-
-        if not tool_uses:
-            messages.append(
-                {"role": "user", "content": "Use the tools, or call finish with your summary."}
-            )
-            continue
-
-        results = []
-        for tu in tool_uses:
-            # Once finish is called, don't run later tools in the same batch
-            # (they could mutate kernel state after the session was declared
-            # done). Each tool_use still needs a matching tool_result.
-            if run.finished:
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": _block_get(tu, "id"),
-                        "content": "skipped: session already finished",
-                        "is_error": True,
-                    }
-                )
-                continue
-            name = _block_get(tu, "name")
-            args = dict(_block_get(tu, "input") or {})
-            content, is_error = run.dispatch(name, args)
-            log(f"[tool] {name}({json.dumps(args)[:120]}) -> "
-                + (content if isinstance(content, str) else "<image+status>")[:160])
-            result_block = {
-                "type": "tool_result",
-                "tool_use_id": _block_get(tu, "id"),
-                "content": content,
-            }
-            if is_error:
-                result_block["is_error"] = True
-            results.append(result_block)
-        messages.append({"role": "user", "content": results})
-        if run.finished:
-            break
-
-    proof, report, artifacts = run.finalize()
-    return AgentResult(
-        spec=spec, out_dir=str(run.out), proof=proof, report=report,
-        turns=turns, summary=run.summary, artifacts=artifacts,
-    )
-
-
-def run_agent_claude_code(
-    spec: ProblemSpec,
-    out_dir,
-    model: str | None = None,
-    max_turns: int = 40,
-    log=print,
-    on_run=None,
-) -> AgentResult:
-    """The "claude-code" backend: the Claude Agent SDK on the user's `claude` login.
-
-    Tools are served from an in-process MCP server; `look` images travel as
-    MCP image content. Claude Code's own built-in tools are disabled so the
-    session stays inside the sandbox.
-    """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        create_sdk_mcp_server,
-        query,
-    )
-    from claude_agent_sdk import tool as sdk_tool
-
-    run = AgentRun(spec, out_dir)
-    if on_run is not None:
-        on_run(run)
-
-    def bridge(t: dict):
-        @sdk_tool(t["name"], t["description"], t["input_schema"])
-        async def handler(args, _name=t["name"]):
-            if run.finished and _name != "finish":
-                return {"content": [{"type": "text", "text": "ERROR: session already finished"}]}
-            content, is_error = run.dispatch(_name, dict(args or {}))
-            if isinstance(content, str):
-                blocks = [{"type": "text", "text": ("ERROR: " if is_error else "") + content}]
-            else:
-                blocks = []
-                for b in content:
-                    if b["type"] == "image":
-                        blocks.append(
-                            {
-                                "type": "image",
-                                "data": b["source"]["data"],
-                                "mimeType": b["source"]["media_type"],
-                            }
-                        )
-                    else:
-                        blocks.append(b)
-            log(f"[tool] {_name} -> " + ("<image+status>" if not isinstance(content, str) else content[:160]))
-            return {"content": blocks}
-
-        return handler
-
-    server = create_sdk_mcp_server(name="sim", version="0.1.0", tools=[bridge(t) for t in TOOLS])
-    options = ClaudeAgentOptions(
-        mcp_servers={"sim": server},
-        allowed_tools=[f"mcp__sim__{t['name']}" for t in TOOLS],
-        disallowed_tools=[
-            "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Read", "Glob",
-            "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite",
-        ],
-        system_prompt=SYSTEM,
-        permission_mode="bypassPermissions",
-        max_turns=max_turns,
-        model=model,  # None -> the login's default model
-        cwd=str(run.out),
-    )
-
-    turns = 0
-
-    async def go():
-        nonlocal turns
-        async for message in query(prompt=_task_prompt(spec), options=options):
-            if run.stop_requested:
-                break  # closing the generator tears down the SDK session
-            if isinstance(message, AssistantMessage):
-                turns += 1
-                for block in message.content:
-                    thinking = getattr(block, "thinking", None)
-                    if thinking:
-                        run.note_thought(thinking, kind="thinking")
-                    text = getattr(block, "text", None)
-                    if text:
-                        run.note_thought(text, kind="text")
-                        log(f"[agent] {text[:300]}")
-            elif isinstance(message, ResultMessage):
-                cost = getattr(message, "total_cost_usd", None)
-                log(f"[session] done ({turns} assistant turns"
-                    + (f", ${cost:.4f}" if cost else "") + ")")
-
-    asyncio.run(go())
-    proof, report, artifacts = run.finalize()
-    return AgentResult(
-        spec=spec, out_dir=str(run.out), proof=proof, report=report,
-        turns=turns, summary=run.summary, artifacts=artifacts,
-    )
-
-
-def run(
-    spec: ProblemSpec,
-    out_dir,
-    backend: str | None = None,
-    model: str | None = None,
-    max_turns: int = 40,
-    log=print,
-    on_run=None,
-) -> AgentResult:
-    """Backend dispatcher: 'api', 'claude-code', or None/'auto' to resolve."""
-    resolved = resolve_backend(backend)
-    log(f"[backend] {resolved}")
-    if resolved == "claude-code":
-        return run_agent_claude_code(
-            spec, out_dir, model=model, max_turns=max_turns, log=log, on_run=on_run
-        )
-    return run_agent(spec, out_dir, model=model, max_turns=max_turns, log=log, on_run=on_run)

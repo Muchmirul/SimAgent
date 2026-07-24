@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -72,31 +75,53 @@ def _cmd_play(args) -> int:
 
 
 def _cmd_agent(args) -> int:
-    from . import agent as agent_mod
+    if args.problem:
+        spec = get(args.problem)
+        source_args = ["--problem-id", args.problem]
+    elif args.spec:
+        spec = ProblemSpec.load(args.spec)
+        source_args = ["--spec", str(Path(args.spec).resolve())]
+    elif args.conjecture:
+        from .llm import formalize
 
-    spec = _resolve_spec(args)
-    out = args.out or str(Path("runs") / f"agent-{spec.id}")
-    result = agent_mod.run(
-        spec, out, backend=args.backend, model=args.model, max_turns=args.max_turns
-    )
-    print(f"\n== {spec.title} — agent session ({result.turns} turns) ==")
-    if result.proof is not None:
-        print(
-            f"Proof: {result.proof.method.value.replace('_', ' ')} — "
-            f"verified by {result.proof.verified_by}"
-        )
-    elif result.report is not None:
-        print(f"Verdict: {answer_mod.verdict_text(result.report)} (no proof)")
+        spec = formalize(args.conjecture)
+        source_args = []
     else:
-        print("No kernel-grade result was established in this session.")
-    print(f"Run dir: {result.out_dir}")
-    for name, path in sorted(result.artifacts.items()):
-        print(f"  {name:14s} {path}")
-    print(
-        "Replay the mind trace (thought + act + scene + equation per step): "
-        "`simagent web` → Mind panel"
-    )
-    return 0
+        raise SystemExit(
+            "give a bundled problem id, --spec spec.json, or --conjecture 'text' (see `simagent list`)"
+        )
+    out = Path(args.out or Path("runs") / f"agent-{spec.id}").resolve()
+    if args.conjecture:
+        out.mkdir(parents=True, exist_ok=True)
+        spec_path = out / "input.spec.json"
+        spec.save(spec_path)
+        source_args = ["--spec", str(spec_path)]
+    repo_root = Path(__file__).resolve().parents[2]
+    pi_cli = Path(os.environ.get("SIMAGENT_PI_CLI", repo_root / "agent" / "dist" / "cli.js"))
+    if not pi_cli.is_file():
+        raise SystemExit(
+            f"pi runtime is not built: {pi_cli} (run `cd agent && npm ci && npm run build`)"
+        )
+    node = os.environ.get("SIMAGENT_PI_NODE") or shutil.which("node")
+    if not node:
+        raise SystemExit("Node.js >=22.19 is required for pi agent mode")
+    command = [
+        node,
+        str(pi_cli),
+        "run",
+        *source_args,
+        "--out-dir",
+        str(out),
+        "--thinking",
+        args.thinking,
+        "--max-turns",
+        str(args.max_turns),
+    ]
+    if args.provider or args.model:
+        if not (args.provider and args.model):
+            raise SystemExit("--provider and --model must be given together")
+        command.extend(["--provider", args.provider, "--model", args.model])
+    return subprocess.run(command, cwd=repo_root, check=False).returncode
 
 
 def _cmd_web(args) -> int:
@@ -155,16 +180,16 @@ def main(argv=None) -> int:
     pl.add_argument("--out", help="play directory (default runs/play-<id>)")
     pl.set_defaults(fn=_cmd_play)
 
-    a = sub.add_parser("agent", help="let an LLM live in the sandbox: see, act, prove (uses the Claude API)")
+    a = sub.add_parser("agent", help="let a pi-managed LLM live in the sandbox: see, act, prove")
     a.add_argument("problem", nargs="?", help="bundled problem id (see `simagent list`)")
     a.add_argument("--spec", help="path to a spec.json")
     a.add_argument("--conjecture", help="natural-language conjecture (formalized first)")
-    a.add_argument("--model", help="Claude model id (default claude-opus-4-8; env SIMAGENT_MODEL)")
+    a.add_argument("--provider", help="pi provider id (requires --model)")
+    a.add_argument("--model", help="pi model id (requires --provider)")
     a.add_argument(
-        "--backend",
-        choices=["auto", "api", "claude-code"],
-        default="auto",
-        help="auto (default), api (needs API key), or claude-code (uses your `claude` login)",
+        "--thinking",
+        choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+        default="medium",
     )
     a.add_argument("--max-turns", type=int, default=40)
     a.add_argument("--out", help="output directory (default runs/agent-<id>)")

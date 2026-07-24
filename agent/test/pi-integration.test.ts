@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   fauxAssistantMessage,
@@ -47,7 +47,11 @@ interface Harness {
 
 async function harness(
   responses: FauxResponseStep[] = [],
-  options: { persistent?: boolean; input?: ("text" | "image")[] } = {},
+  options: {
+    persistent?: boolean;
+    input?: ("text" | "image")[];
+    singleToolPerTurn?: boolean;
+  } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "simagent-p0-"));
   const provider = `simagent-faux-${++providerSequence}`;
@@ -72,6 +76,7 @@ async function harness(
     sessionManager,
     modelRuntime,
     model,
+    singleToolPerTurn: options.singleToolPerTurn,
   });
   return { root, runtime, faux, modelRuntime };
 }
@@ -91,11 +96,20 @@ async function journal(runtime: SimAgentRuntime): Promise<Record<string, unknown
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+async function journalTrace(runtime: SimAgentRuntime): Promise<Array<Record<string, any>>> {
+  const text = await readFile(join(dirname(runtime.kernel.description.journalPath), "trace.jsonl"), "utf8");
+  return text
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, any>)
+    .filter((entry) => entry.event === undefined);
+}
+
 function toolResults(context: Context) {
   return context.messages.filter((message) => message.role === "toolResult");
 }
 
-describe.sequential("Pi 0.81.1 SimAgent P0 integration", () => {
+describe.sequential("Pi 0.81.1 SimAgent integration", () => {
   it("registers only explicit kernel tools with no discovered resources or active built-ins", async () => {
     const item = await harness();
     try {
@@ -219,6 +233,101 @@ describe.sequential("Pi 0.81.1 SimAgent P0 integration", () => {
       );
       expect(resultIndex).toBeGreaterThanOrEqual(0);
       expect(steerIndex).toBeGreaterThan(resultIndex);
+    } finally {
+      await cleanup(item);
+    }
+  });
+
+  it("journals model narrative and delivers a targeted comment as steering", async () => {
+    let continuation: Context | undefined;
+    const item = await harness([
+      fauxAssistantMessage(
+        [
+          fauxText("I will inspect the current margin."),
+          fauxToolCall(
+            "set_var",
+            { name: "T", values: [-1, 0, 1, 0, 0, 0.2] },
+            { id: "call-comment-target" },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      (context) => {
+        continuation = JSON.parse(JSON.stringify(context)) as Context;
+        return fauxAssistantMessage(fauxText("I will follow the user's equation hint."));
+      },
+    ]);
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolveStarted) => {
+      signalStarted = resolveStarted;
+    });
+    item.runtime.session.subscribe((event) => {
+      if (event.type === "tool_execution_start" && event.toolCallId === "call-comment-target") {
+        signalStarted();
+      }
+    });
+    let disposed = false;
+    try {
+      const prompting = item.runtime.promptTask();
+      await started;
+      await item.runtime.comment("Check the sign on this line.", {
+        step: 1,
+        kind: "equation",
+        index: 0,
+      });
+      await prompting;
+      await item.runtime.dispose();
+      disposed = true;
+      const messages = continuation?.messages ?? [];
+      expect(
+        messages.some(
+          (message) =>
+            message.role === "user" &&
+            JSON.stringify(message.content).includes("Check the sign on this line."),
+        ),
+      ).toBe(true);
+      const steps = await journalTrace(item.runtime);
+      expect(steps.find((step) => step.kind === "user_comment")?.text).toBe(
+        "Check the sign on this line.",
+      );
+      expect(steps.find((step) => step.tool === "set_var")?.thought?.[0]?.text).toContain(
+        "inspect the current margin",
+      );
+      expect(steps.at(-1)?.thought?.[0]?.text).toContain("follow the user's equation hint");
+    } finally {
+      await cleanup(item, disposed);
+    }
+  });
+
+  it("limits product sessions to one kernel action per turn", async () => {
+    const item = await harness(
+      [
+        fauxAssistantMessage(
+          [
+            fauxToolCall("check", {}, { id: "single-first" }),
+            fauxToolCall("sample", { seed: 9 }, { id: "single-blocked" }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(fauxText("one action completed")),
+      ],
+      { singleToolPerTurn: true },
+    );
+    try {
+      await item.runtime.promptTask();
+      const calls = (await journal(item.runtime)).filter((entry) => entry.event === "call");
+      expect(calls.map((entry) => entry.toolCallId)).toEqual(["single-first"]);
+      const blocked = item.runtime.session.sessionManager.getEntries().find(
+        (entry) =>
+          entry.type === "message" &&
+          entry.message.role === "toolResult" &&
+          entry.message.toolCallId === "single-blocked",
+      );
+      expect(blocked?.type).toBe("message");
+      if (blocked?.type === "message" && blocked.message.role === "toolResult") {
+        expect(blocked.message.isError).toBe(true);
+      }
+      expect(item.runtime.latestCheckpoint().kernelTraceStep).toBe(1);
     } finally {
       await cleanup(item);
     }

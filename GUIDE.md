@@ -1,108 +1,169 @@
-# SimAgent — simple guide
+# SimAgent - simple guide
 
-## 1. Start it
+## 1. How pi fits into SimAgent
+
+Pi is embedded inside SimAgent as the model runtime. The normal `pi` terminal
+is used only to log in. Do not type the math problem there and expect the web
+notebook to start. Start SimAgent's web server, then enter the problem in the
+browser. The browser launches and controls the pi session.
+
+First-time setup requires `uv` and Node.js 22.19 or newer:
 
 ```bash
 cd /mnt/Tforce/dev/SimAgent
+uv venv .venv
+uv pip install -p .venv/bin/python -e ".[dev]"
+(cd agent && npm ci --ignore-scripts && npm run build)
+(cd agent && npx pi)
+```
+
+The last command opens the exact pi version pinned by SimAgent. Inside pi,
+enter `/login`, authenticate an OpenAI Codex account, then quit pi.
+On this machine, `openai-codex/gpt-5.6-sol` is already authenticated through
+OAuth and supports images. Verify it with:
+
+```bash
+node agent/dist/cli.js auth-check \
+  --provider openai-codex \
+  --model gpt-5.6-sol
+```
+
+Start the notebook for each working session:
+
+```bash
 .venv/bin/simagent web
 ```
 
 Your browser opens the **reasoning notebook** at **http://127.0.0.1:8642**.
-(If the port is busy: `--port 8700`.)
+If it does not open, enter that address manually. If the port is busy, use
+`.venv/bin/simagent web --port 8700`. The default address is local-only; do
+not expose the notebook publicly because it has no user authentication.
 
 ## 2. The idea
 
-A coding agent shows its work as diffs. SimAgent shows a *math* agent's work
-as a **visual chain of thought**: the agent lives in a sandbox (its "mind"),
-and the notebook streams that mind step by step. Equations appear in every
-cell, but as *translations* of what the agent is looking at — the thinking
-happens in the scene; the symbols are the record.
+A coding agent shows its work as diffs. SimAgent shows a math agent's work as
+a **visual reasoning trace**: the agent lives in a sandbox, and the notebook
+streams its recorded narrative and actions step by step. Equations appear in
+every cell as translations of the executable scene. The scene is the working
+state, and the symbols are its record.
 
 The sandbox is not limited to 3D: claims live in any dimension (there is a
 bundled ℝ⁴ problem). For d ≤ 3 the pictures are faithful; above that they are
 honest projections and the numbers lead. Above d = 3 no Lean certificate is
-generated yet — the verdict tops out at exact rational arithmetic, and the
+generated yet: the verdict tops out at exact rational arithmetic, and the
 answer says so explicitly.
 
 The agent's senses and hands, beyond looking and moving points:
 
-- **measure** — the qualitative description ("outside, beyond the face
+- **measure**: the qualitative description ("outside, beyond the face
   opposite vertex 2, margin −0.41")
-- **view field** — the claim's margin painted over a slice of configuration
+- **view field**: the claim's margin painted over a slice of configuration
   space: blue where it HOLDS, red where it FAILS, the amber **zero-contour is
   the shape of the theorem's boundary** (for the triangle claim it is
   literally the Thales circle)
-- **view sweep / trajectory** — margin along one coordinate / over the session
-- **imagine** — an Einstein thought experiment: ops run on a *fork* of the
+- **view sweep / trajectory**: margin along one coordinate / over the session
+- **imagine**: an Einstein thought experiment, ops run on a *fork* of the
   world, shown as a dashed **Im[n]** cell with a ghost image; the real
   configuration is untouched
-- **construct** — the sketching hand: add a midpoint / centroid / circumcenter
+- **construct**: the sketching hand, add a midpoint / centroid / circumcenter
   to the scene; it renders from then on and follows its ancestors
-- **expect** — a falsifiable prediction (◌ chip) that the harness scores
-  mechanically against later states (✓/✗ chips) — prediction error is how the
+- **expect**: a falsifiable prediction (◌ chip) that the harness scores
+  mechanically against later states (✓/✗ chips). Prediction error is how the
   agent learns the scene
 
 ## 3. Run an agent on a bundled problem
 
-1. In the **In [ ]:** cell, pick a problem (e.g. *Circumcenter lies inside
-   every tetrahedron*).
-2. Press **Run agent**. (**■ stop** ends the running session — kernel results
-   established so far are kept and the verdict cell still appears; **⟳ restart**
-   stops it and re-runs the same problem in a fresh notebook.)
-3. Cells stream in, one per step of the agent's mind:
-   - **approach** (amber box) — the agent's declared line of attack: one of
+1. Under **pi model**, select **openai-codex/gpt-5.6-sol**.
+2. Under **thinking**, select **max**. Maximum thinking is slower and can use
+   more account quota.
+3. Set **max turns**. Start with 40.
+4. In the **In [ ]:** cell, pick a problem, such as *Circumcenter lies inside
+   every tetrahedron*.
+5. Press **Run agent**. **■ stop** ends the running session while preserving
+   kernel results established so far. **⟳ restart** stops it and runs the same
+   problem in a fresh notebook.
+6. Cells stream in, one per recorded reasoning step:
+   - **approach** (amber box): the agent's declared line of attack, one of
      the ten proof methods plus its idea, re-declared when it switches
      strategy. This is intent; the end verdict shows *declared vs established*.
-   - **thinking** (dim italic) and **says** — the model's narrative before the act
-   - **act** — the tool it chose: `look()`, `set_var(…)`, `hunt(…)`, `certify()` …
-   - the **picture** — for `look` steps, the exact image the agent saw;
+   - **thinking** (dim italic) and **says**: the model's narrative before the act
+   - **act**: the tool it chose, `look()`, `set_var(…)`, `hunt(…)`, `certify()` …
+   - the **picture**: for `look` steps, the exact image the agent saw;
      otherwise the scene after the act. **Click any picture** to open it as an
      interactive 3D view (drag to orbit, scroll to zoom, Esc to close).
    - the **equations** the harness wrote down for that state (amber box)
-   - a **diff** — which points moved (`- before` / `+ after`) and the margin change
+   - a **diff**: which points moved (`- before` / `+ after`) and the margin change
    - a **HOLDS / FAILS** badge with the margin (margin > 0 ⇔ the property holds)
-4. The final **verdict cell** comes only from the kernel (`proof.json`):
-   *method — verified by sandbox+lean* means exact arithmetic plus a Lean
-   kernel certificate. If nothing was certified, it says so — the agent's
+7. To steer the run, select text or double-click a cell, thought, action, or
+   equation line. In 3D, click a point or primitive. Send a comment for the
+   next pi turn, or choose **branch with comment** to rewind and continue from
+   that exact state. Comments are visible narrative, never proof material.
+8. The final **verdict cell** comes only from the kernel (`proof.json`):
+   *method: verified by sandbox+lean* means exact arithmetic plus a Lean
+   kernel certificate. If nothing was certified, it says so. The agent's
    prose never upgrades a claim.
 
-Backends: **auto** uses your Claude API key if one is set, else your `claude`
-login (claude-code). Bundled problems work on either.
+This selects the same pi provider, GPT-5.6 Sol model, maximum thinking level,
+and vision capability requested for the session. Its environment is different
+from a general coding session: it receives only SimAgent's closed geometry and
+proof tools. Python remains the authority for state changes and verdicts.
 
 ## 4. Type your own problem
 
-Write it in the text box in plain words, e.g.
+Type the problem in the SimAgent browser text box, not in the normal pi
+terminal. For example:
 
 > the incenter of every triangle lies inside the triangle
 
-and press **Run agent**. The server first *formalizes* it (Claude turns the
-sentence into a spec, validated against the sandbox — this step needs Claude
-API auth), then the agent session starts and the cells stream in as above.
+Then press **Run agent**. There are currently two model stages:
+
+1. Claude formalizes the sentence into a native claim and validates it against
+   the closed sandbox registries.
+2. Pi launches GPT-5.6 Sol with maximum thinking to investigate that claim.
+
+The first stage needs `ANTHROPIC_API_KEY` or an `ant auth login` profile. If
+Claude access is not configured, use a bundled problem. Natural-language
+formalization through GPT-5.6 Sol itself is not implemented yet.
 
 ## 5. Replay past runs
 
-The header dropdown lists every recorded run (web-started and CLI-started
-alike). Pick one to re-read the whole notebook; if the run is still going,
-the page follows it live. Deep-link with `?run=<name>`.
+The header dropdown lists every recorded run, including web-started and
+CLI-started runs. Pick one to read the notebook; if its trace is still being
+written, the page follows it live. Deep-link with `?run=<name>`.
+
+Start runs from the browser when you need live comments, stopping, restarting,
+or exact branches. Keep that web-server process running while using these
+controls. Restarting the server preserves traces for replay, but it does not
+restore control of an old pi session. A separately launched CLI session can be
+viewed in the browser, but it is owned by a different controller and cannot be
+steered there.
 
 ## 6. Without the browser
 
 ```bash
 .venv/bin/simagent list                              # see the problems
 .venv/bin/simagent solve circumcenter-in-tetrahedron # full automatic run
-.venv/bin/simagent agent circumcenter-in-triangle    # embodied agent in the terminal
 .venv/bin/simagent play circumcenter-in-triangle     # hands-on REPL sandbox
+
+.venv/bin/simagent agent circumcenter-in-triangle \
+  --provider openai-codex \
+  --model gpt-5.6-sol \
+  --thinking max \
+  --out "runs/agent-triangle-$(date +%Y%m%d-%H%M%S)"
 ```
+
+The normal pi terminal does not open the SimAgent browser automatically. Use
+`simagent web` for the full live notebook and steering workflow.
 
 `solve` writes a folder under `runs/` with the picture, `answer.md`,
 `answer.tex`, `conjecture.lean`, and `report.json`. `agent` additionally
-writes `trace.jsonl` — the mind trace the notebook replays. Manim stills and
+writes `trace.jsonl`, the reasoning trace the notebook replays. Manim stills and
 videos render via `simagent solve --render-manim` (see README for the no-sudo
 Manim env).
 
 ## 7. Reading the verdicts honestly
 
-- **CERTIFIED counterexample** — proved false. Done.
-- **numeric candidate** — looks false, but exact check didn't confirm. Not proof.
-- **no counterexample found** — evidence it may be true. **Never** a proof —
+- **CERTIFIED counterexample**: proved false. Done.
+- **numeric candidate**: looks false, but exact check did not confirm. Not proof.
+- **no counterexample found**: evidence it may be true. **Never** a proof;
   proving still needs math/Lean (that's the roadmap).

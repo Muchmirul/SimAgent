@@ -254,12 +254,13 @@ rational arithmetic (sandbox) only."*
   verdict, explicit d>3 wording**; formalize emits Claim JSON (closed menu +
   repair loop); THEN delete exec paths and path shims (release tag first).
   Gate: all ground truths with zero exec'd strings; hardening tests untouched.
-- **P6 — pi integration (2).** agent/ package for real; delete agent.py
-  backends + web job runner; notebook and CLI launch pi sessions; steering
-  (issue #6 full UX incl. 3D raycast pick) + branch-from-here + provenance
-  chips. Gate: issue #6 acceptance criteria including
-  comment-cannot-change-verdict hardening test; branch reproduces prefix state
-  exactly.
+- **P6 - pi integration (landed).** `agent/` is the exact-pinned pi runtime and
+  session service; the Python provider backends and web job runner are gone.
+  Notebook and CLI launch pi sessions through a strict JSONL control bridge.
+  Select-and-comment covers cells, thought/action/equation lines, and 3D
+  raycast picks; branches use settled pi checkpoints, hash-verified kernel
+  replay, and provenance chips. Gates: comment-cannot-change-verdict hardening
+  test, visible next-turn steering response, and exact prefix branch replay.
 - **P7 — UX v2 + multi-agent (2).** Event/journal merge in the notebook;
   lanes; peers/adopt/fork-from-peer; merge_best; provenance UI. Gate:
   test_collab with injected fake runners (merge prefers certified; adoption

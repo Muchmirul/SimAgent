@@ -93,6 +93,7 @@ Example verdict from the tetrahedron run — note the witness is *exact*:
 ## The reasoning notebook (recommended)
 
 ```bash
+(cd agent && npm ci --ignore-scripts && npm run build)
 .venv/bin/simagent web
 ```
 
@@ -160,51 +161,47 @@ exact verdict. `help` lists everything.
 
 ## Agent mode: the LLM lives in the sandbox
 
-This is the point of the whole harness: the model is *embodied* in the 3D
-world. Its `look` tool returns the rendered scene as an image (vision), and
-its hands are the same moves a human has — `plan` (declare the line of
-attack: method + idea, recorded as intent), `sample`, `set_var`, `nudge`,
-`check`, `refine`, `hunt`, `exhaust`, `certify`, `submit_lean_proof`,
-`finish`. The loop is a deliberately small manual tool loop that we own.
+Pi owns the model loop, provider authentication, steering, events, and
+conversation branches. Python still owns every world action, exact check,
+Lean check, and verdict. The model sees the scene through `look` and acts only
+through the closed SimAgent tool set: `plan`, `measure`, `view`, `imagine`,
+`construct`, `expect`, movement/search tools, `certify`, Lean submission, and
+`finish`.
 
-Two backends, same embodied loop and same kernel:
+Install and authenticate pi once:
 
 ```bash
-# On your claude login (no API key) — Claude Agent SDK + the `claude` CLI:
-uv pip install -p .venv/bin/python -e ".[login]"
-.venv/bin/simagent agent circumcenter-in-triangle                 # backend auto-detects
-.venv/bin/simagent agent circumcenter-in-triangle --backend claude-code
+cd agent
+npm ci --ignore-scripts
+npm run build
+pi                         # use /login for a subscription or API provider
+cd ..
+.venv/bin/simagent agent circumcenter-in-triangle
 
-# Or on an API key / `ant auth login` profile:
-.venv/bin/simagent agent --conjecture "your claim in plain words" --backend api
+# Optional explicit pi model:
+.venv/bin/simagent agent circumcenter-in-triangle \
+  --provider openai-codex --model gpt-5.4
 ```
 
-`--backend auto` (default) uses the API when a key/profile is present, else
-your `claude` login. A real session on the login looks like this — the model
-saw the scene, hand-built an obtuse triangle, and the kernel Lean-verified it:
+Every run has two correlated records:
 
-```
-[tool] look   -> <image+status>
-[tool] set_var -> holds=false margin=-12.0
-[tool] certify -> certified=true  T = [[-1,0],[1,0],[0,1/5]]
-[tool] finish
-Proof: counterexample — verified by sandbox+lean
-```
+- the pi session is the conversation, including user steering and branches;
+- `trace.jsonl` and `kernel-journal.jsonl` are the reproducible world history.
 
-The trust rule survives embodiment: the model's narrative is saved as
-narrative (`agent_summary.md`), but the final verdict is built **only from
-kernel state** — certified reports and kernel-checked Lean — exactly as in
-batch runs. An agent session that certifies a hand-picked counterexample
-produces the same `proof.json` + `certificate.lean` a pipeline run would.
+A comment enters pi as a user steering turn and appears in the trace as
+`user_comment`. It cannot alter proof state. Branching replays an exact journal
+prefix, verifies its state hash, and records source run, step, journal sequence,
+and hash as provenance.
 
-**Watch it think.** Every agent run writes a *mind trace* (`trace.jsonl`):
-per step, the model's thought, the act, the resulting 3D scene, the
-harness's equation translation of that state, and a diff vs the previous
-step. Open `simagent web` and the run appears in the reasoning notebook —
-each step a cell, like a coding agent's diff view, streaming live while the
-agent works. The model thinks in the scene; the equations are the harness
-translating each picture into symbols. Traces are narrative + reproducible
-state, never verdict material.
+The trust rule survives embodiment: the model's narrative and comments are
+saved as narrative, while the final verdict is built **only from kernel
+state**. A certified hand-picked counterexample produces the same `proof.json`
+and Lean certificate as a batch run.
+
+Open `simagent web` to watch each thought, action, picture, equation
+translation, and diff. Select text or double-click a thought, action, equation,
+or cell to comment. In the 3D overlay, click a point or primitive to comment on
+that object. Use **branch from here** to continue from that exact state.
 
 ## The LLM stages (need Claude API access)
 
@@ -218,9 +215,9 @@ state, never verdict material.
 
 Auth resolves from `ANTHROPIC_API_KEY` or an `ant auth login` profile. Default
 model is `claude-opus-4-8` (override with `--model` or `SIMAGENT_MODEL`). The
-formalizer's output is never trusted blindly: generated `check`/`build_scene`/
-`certify` code is compiled and smoke-tested against the sandbox, and validation
-errors are fed back for repair before the spec is accepted.
+formalizer's output is never trusted blindly: its native Claim JSON is checked
+against the closed registries and smoke-tested in the sandbox, and validation
+errors are fed back for repair before the claim is accepted.
 
 ## How an answer earns its label
 
@@ -275,7 +272,7 @@ loop.
 
 - `simagent play` — interactive sandbox REPL with a live-updating 3D preview
 - `simagent web` — reasoning notebook: problem in, visual chain of thought out (live)
-- `simagent agent` — embodied LLM (vision + tools) on an API key or your `claude` login
+- `simagent agent` — embodied LLM (vision + tools) through authenticated pi providers
 - Proof kernel: ten classical methods, `verified_by` trust ladder
 - Lean integration: generated core-Lean certificates (`decide`, axiom-free) for
   counterexample / construction / exhaustion; fail-closed checker

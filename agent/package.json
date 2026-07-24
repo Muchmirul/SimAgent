@@ -1,6 +1,6 @@
 {
-  "name": "@simagent/pi-runtime-spike",
-  "version": "0.0.0-p0",
+  "name": "@simagent/agent",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "service": "node dist/service.js",
     "auth:check": "node dist/cli.js auth-check",
     "smoke": "node dist/cli.js smoke"
   },

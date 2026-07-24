@@ -1,6 +1,6 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createExtensionRuntime,
@@ -59,13 +59,15 @@ export interface BranchCheckpoint {
   id: string;
   piEntryId: string;
   kernelJournalSeq: number;
+  kernelTraceStep: number;
   kernelStateHash: string;
   settled: true;
   safe: boolean;
 }
 
 export interface CreateSimAgentRuntimeOptions {
-  problemId: string;
+  problemId?: string;
+  specPath?: string;
   outDir: string;
   cwd?: string;
   sessionDir?: string;
@@ -78,6 +80,8 @@ export interface CreateSimAgentRuntimeOptions {
   /** Internal/public for deterministic prefix-replay tests and branch creation. */
   replayJournal?: string;
   replayThrough?: number;
+  /** Product sessions use one kernel action per turn so every trace cell is branch-safe. */
+  singleToolPerTurn?: boolean;
 }
 
 async function selectModel(runtime: ModelRuntime, requested?: Model<any>): Promise<Model<any>> {
@@ -125,7 +129,15 @@ export class SimAgentRuntime {
   private checkpoints: BranchCheckpoint[] = [];
   private checkpointSequence = 0;
   private readonly unsubscribe: () => void;
+  private readonly narratedMessages = new WeakSet<object>();
+  private narrativeQueue: Promise<void> = Promise.resolve();
+  private steeringBoundary: Promise<void> = Promise.resolve();
+  private readonly steeringSourceToolCalls = new Set<string>();
+  private readonly activeToolCalls = new Set<string>();
+  private toolBatchWaiters: Array<() => void> = [];
   private disposed = false;
+  private readonly singleToolPerTurn: boolean;
+  private readonly bundledProblemId: string | undefined;
 
   constructor(
     session: AgentSession,
@@ -133,6 +145,8 @@ export class SimAgentRuntime {
     modelRuntime: ModelRuntime,
     model: Model<any>,
     resourceLoader: ResourceLoader,
+    singleToolPerTurn: boolean,
+    bundledProblemId: string | undefined,
   ) {
     this.session = session;
     this.kernel = kernel;
@@ -140,9 +154,71 @@ export class SimAgentRuntime {
     this.model = model;
     this.description = kernel.description;
     this.resourceLoader = resourceLoader;
+    this.singleToolPerTurn = singleToolPerTurn;
+    this.bundledProblemId = bundledProblemId;
     this.unsubscribe = session.subscribe((event) => {
-      if (event.type === "turn_end") this.recordCheckpoint();
+      if (event.type === "tool_execution_start") {
+        this.activeToolCalls.add(event.toolCallId);
+      } else if (event.type === "tool_execution_end") {
+        this.activeToolCalls.delete(event.toolCallId);
+        if (this.activeToolCalls.size === 0) {
+          const waiters = this.toolBatchWaiters;
+          this.toolBatchWaiters = [];
+          for (const resolveWaiter of waiters) resolveWaiter();
+        }
+      } else if (event.type === "turn_end") {
+        void this.flushAssistantNarrative(event.message).then(() => this.recordCheckpoint());
+      }
     });
+    this.installBeforeToolHook();
+  }
+
+  private flushAssistantNarrative(message: unknown): Promise<void> {
+    if (typeof message !== "object" || message === null || this.narratedMessages.has(message)) {
+      return this.narrativeQueue;
+    }
+    const assistant = message as AssistantMessage;
+    if (assistant.role !== "assistant" || !Array.isArray(assistant.content)) {
+      return this.narrativeQueue;
+    }
+    this.narratedMessages.add(message);
+    const blocks: Array<{ kind: "text" | "thinking"; text: string }> = [];
+    for (const block of assistant.content) {
+      if (block.type === "thinking" && block.thinking.trim()) {
+        blocks.push({ kind: "thinking", text: block.thinking });
+      } else if (block.type === "text" && block.text.trim()) {
+        blocks.push({ kind: "text", text: block.text });
+      }
+    }
+    for (const block of blocks) {
+      this.narrativeQueue = this.narrativeQueue.then(async () => {
+        await this.kernel.noteThought(block.text, block.kind);
+      });
+    }
+    return this.narrativeQueue;
+  }
+
+  private installBeforeToolHook(): void {
+    const inherited = this.session.agent.beforeToolCall;
+    this.session.agent.beforeToolCall = async (context, signal) => {
+      // A comment can arrive after tool_execution_start but before this hook.
+      // That current tool must finish to reach the comment boundary; only a
+      // later tool waits for the annotation to be persisted.
+      if (!this.steeringSourceToolCalls.has(context.toolCall.id)) {
+        await this.steeringBoundary;
+      }
+      await this.flushAssistantNarrative(context.assistantMessage);
+      const inheritedResult = await inherited?.(context, signal);
+      if (inheritedResult?.block || !this.singleToolPerTurn) return inheritedResult;
+      const first = context.assistantMessage.content.find((block) => block.type === "toolCall");
+      if (first?.type === "toolCall" && first.id !== context.toolCall.id) {
+        return {
+          block: true,
+          reason: "SimAgent accepts one world action per turn so every notebook cell is branch-safe; reissue this action next turn.",
+        };
+      }
+      return inheritedResult;
+    };
   }
 
   private recordCheckpoint(): void {
@@ -159,6 +235,7 @@ export class SimAgentRuntime {
       id: `checkpoint-${++this.checkpointSequence}`,
       piEntryId,
       kernelJournalSeq: this.kernel.tip.journalSeq,
+      kernelTraceStep: this.kernel.tip.traceStep,
       kernelStateHash: this.kernel.tip.stateHash,
       settled: true,
       safe: !this.kernel.tip.finished,
@@ -175,8 +252,16 @@ export class SimAgentRuntime {
     return { ...checkpoint };
   }
 
+  captureCheckpoint(): BranchCheckpoint {
+    if (!this.session.isIdle) throw new Error("a checkpoint requires an idle pi session");
+    this.recordCheckpoint();
+    return this.latestCheckpoint();
+  }
+
   async prompt(text: string): Promise<void> {
     await this.session.prompt(text, { expandPromptTemplates: false });
+    await this.narrativeQueue;
+    this.recordCheckpoint();
   }
 
   async promptTask(): Promise<void> {
@@ -190,6 +275,7 @@ export class SimAgentRuntime {
     if (
       known.piEntryId !== checkpoint.piEntryId ||
       known.kernelJournalSeq !== checkpoint.kernelJournalSeq ||
+      known.kernelTraceStep !== checkpoint.kernelTraceStep ||
       known.kernelStateHash !== checkpoint.kernelStateHash
     ) {
       throw new Error("branch checkpoint metadata does not match this session");
@@ -209,8 +295,7 @@ export class SimAgentRuntime {
     if (!branchModel) throw new Error("source Pi session has no active model");
     assertVisionModel(branchModel);
 
-    const branched = await createSimAgentRuntime({
-      problemId: this.description.specId,
+    const branchOptions: CreateSimAgentRuntimeOptions = {
       outDir,
       cwd: this.session.sessionManager.getCwd(),
       sessionManager: SessionManager.open(branchFile),
@@ -221,7 +306,11 @@ export class SimAgentRuntime {
       pythonPath: this.kernel.pythonPath,
       replayJournal: this.kernel.tip.journalPath,
       replayThrough: known.kernelJournalSeq,
-    });
+      singleToolPerTurn: this.singleToolPerTurn,
+    };
+    if (this.bundledProblemId !== undefined) branchOptions.problemId = this.bundledProblemId;
+    else branchOptions.specPath = resolve(dirname(this.kernel.tip.journalPath), "spec.json");
+    const branched = await createSimAgentRuntime(branchOptions);
     if (branched.kernel.tip.stateHash !== known.kernelStateHash) {
       await branched.dispose();
       throw new Error("branched kernel state does not match the source checkpoint");
@@ -229,9 +318,66 @@ export class SimAgentRuntime {
     return branched;
   }
 
+  private waitForToolBatch(): Promise<void> {
+    if (this.activeToolCalls.size === 0) return Promise.resolve();
+    return new Promise((resolveWaiter) => this.toolBatchWaiters.push(resolveWaiter));
+  }
+
+  async comment(text: string, target: Record<string, unknown>): Promise<void> {
+    if (!this.session.isStreaming) throw new Error("comments can steer only a running pi session");
+    if (this.kernel.tip.finished) throw new Error("cannot comment on a finished kernel session");
+    const clean = text.trim();
+    if (!clean) throw new Error("comment text must be non-empty");
+    const batch = this.waitForToolBatch();
+    const sourceToolCalls = [...this.activeToolCalls];
+    for (const toolCallId of sourceToolCalls) this.steeringSourceToolCalls.add(toolCallId);
+    const queued = this.session.steer(
+      `User comment on ${JSON.stringify(target)}:\n${clean}\nTreat this as steering only; use kernel tools for every conclusion.`,
+    );
+    const boundary = this.steeringBoundary.then(async () => {
+      await queued;
+      await batch;
+      if (this.kernel.tip.finished) throw new Error("the kernel finished before the comment boundary");
+      await this.kernel.annotate("user_comment", { text: clean, target });
+    });
+    this.steeringBoundary = boundary
+      .catch(() => undefined)
+      .finally(() => {
+        for (const toolCallId of sourceToolCalls) this.steeringSourceToolCalls.delete(toolCallId);
+      });
+    await boundary;
+  }
+
+  async seedComment(text: string, target: Record<string, unknown>): Promise<void> {
+    if (!this.session.isIdle) throw new Error("a branch comment requires an idle pi session");
+    const clean = text.trim();
+    if (!clean) throw new Error("comment text must be non-empty");
+    await this.kernel.annotate("user_comment", { text: clean, target });
+    await this.session.sendCustomMessage(
+      {
+        customType: "simagent-user-comment",
+        content: `User steering comment on ${JSON.stringify(target)}:\n${clean}`,
+        display: true,
+        details: { target },
+      },
+      { triggerTurn: false },
+    );
+  }
+
+  async annotateProvenance(payload: Record<string, unknown>): Promise<void> {
+    await this.kernel.annotate("provenance", payload);
+  }
+
+  async stop(summary = "session stopped by the user"): Promise<void> {
+    if (!this.kernel.tip.finished) await this.kernel.stop(summary);
+    if (!this.session.isIdle) await this.session.abort();
+  }
+
   async dispose(): Promise<KernelFinalizeResult> {
     if (this.disposed) throw new Error("SimAgent runtime is already disposed");
     if (!this.session.isIdle) throw new Error("cannot dispose while Pi is streaming");
+    await this.steeringBoundary;
+    await this.narrativeQueue;
     this.disposed = true;
     this.unsubscribe();
     this.session.dispose();
@@ -252,10 +398,12 @@ export async function createSimAgentRuntime(
   const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
   const model = await selectModel(modelRuntime, options.model);
 
-  const kernelOptions: KernelClientOptions = {
-    problemId: options.problemId,
-    outDir: options.outDir,
-  };
+  if ((options.problemId === undefined) === (options.specPath === undefined)) {
+    throw new Error("provide exactly one of problemId or specPath");
+  }
+  const kernelOptions: KernelClientOptions = { outDir: options.outDir };
+  if (options.problemId !== undefined) kernelOptions.problemId = options.problemId;
+  if (options.specPath !== undefined) kernelOptions.specPath = options.specPath;
   if (options.pythonPath !== undefined) kernelOptions.pythonPath = options.pythonPath;
   if (options.repoRoot !== undefined) kernelOptions.repoRoot = options.repoRoot;
   if (options.replayJournal !== undefined) kernelOptions.replayJournal = options.replayJournal;
@@ -311,7 +459,15 @@ export async function createSimAgentRuntime(
       session.dispose();
       throw new Error(`Pi exposed an unexpected tool set: ${active.join(", ")}`);
     }
-    return new SimAgentRuntime(session, kernel, modelRuntime, model, resourceLoader);
+    return new SimAgentRuntime(
+      session,
+      kernel,
+      modelRuntime,
+      model,
+      resourceLoader,
+      options.singleToolPerTurn ?? false,
+      options.problemId,
+    );
   } catch (error) {
     await kernel.terminate();
     throw error;
