@@ -52,10 +52,18 @@ def simplex_volume(pts) -> float:
 def hull_counts(points) -> tuple[int, int, int]:
     """(V, E, F) of the convex hull boundary of a 3D point cloud.
 
-    The hull boundary is triangulated by qhull, so F counts triangles and E
-    counts unique triangle edges. Raises if the points are degenerate.
+    STRICTLY 3-D (fail closed): the edge walk assumes triangular facets, so a
+    d>3 cloud would silently produce garbage counts — use `hull_facets` for
+    other dimensions. The hull boundary is triangulated by qhull, so F counts
+    triangles and E counts unique triangle edges. Raises if degenerate.
     """
-    hull = ConvexHull(np.asarray(points, dtype=float))
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(
+            "hull_counts is 3-D only (V/E/F of a polyhedron boundary); "
+            "use hull_facets for other dimensions"
+        )
+    hull = ConvexHull(pts)
     V = len(hull.vertices)
     F = len(hull.simplices)
     edges: set[tuple[int, int]] = set()
@@ -74,3 +82,30 @@ def hull_mesh(points) -> tuple[list[list[float]], list[list[int]]]:
     points = np.asarray(points, dtype=float)
     hull = ConvexHull(points)
     return points.tolist(), [[int(i) for i in tri] for tri in hull.simplices]
+
+
+HULL_MAX_DIM = 8  # qhull's practical ceiling; fail closed beyond it
+
+
+def hull_facets(points) -> tuple[int, int, int]:
+    """(V, ridges, facets) of the convex hull of a d-dimensional point cloud —
+    dimension-generic (2 <= d <= 8), unlike the historical 3D pair above.
+
+    qhull triangulates the boundary, so `facets` counts (d-1)-simplices and
+    `ridges` counts their shared (d-2)-faces (each ridge is shared by exactly
+    two facets: ridges = facets * d / 2). Degenerate input raises ValueError —
+    fail closed, never guess.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2:
+        raise ValueError("hull_facets needs an (m, d) point cloud")
+    d = pts.shape[1]
+    if not (2 <= d <= HULL_MAX_DIM):
+        raise ValueError(f"hull_facets supports 2 <= d <= {HULL_MAX_DIM}, got d={d}")
+    try:
+        hull = ConvexHull(pts)
+    except Exception as e:  # noqa: BLE001 - qhull errors become one clear signal
+        raise ValueError(f"degenerate point cloud for a {d}-D hull: {e}") from None
+    facets = len(hull.simplices)
+    ridges = facets * d // 2
+    return len(hull.vertices), ridges, facets

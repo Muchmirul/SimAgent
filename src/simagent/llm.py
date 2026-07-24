@@ -1,8 +1,11 @@
-"""LLM formalizer: natural-language conjecture -> validated ProblemSpec.
+"""LLM formalizer: natural-language conjecture -> validated native Claim.
 
-The model writes *against the sandbox*: its check/scene/certify code is
-compiled and smoke-tested locally (spec.validate_spec); failures are fed back
-for repair. Structured output keeps the spec schema-exact.
+Since P5 the model composes from a CLOSED VOCABULARY — spaces, constructor
+recipe, and registry keys — instead of emitting Python code strings (decision
+D3: typed ops are safer and easier for the model than free code; the exec
+path is deprecated). The output is validated against the sandbox
+(`validate_claim`); failures are fed back for repair. Structured output keeps
+the schema exact.
 
 Auth: the anthropic client resolves ANTHROPIC_API_KEY or an `ant auth login`
 profile automatically — no key handling here.
@@ -16,7 +19,16 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from .spec import ProblemSpec, validate_spec
+from .core.claim import (
+    CERTIFIERS,
+    CONSTRAINTS,
+    LEANS,
+    MEASURES,
+    SCENES,
+    Claim,
+    validate_claim,
+)
+from .core.derive import CONSTRUCTORS
 
 DEFAULT_MODEL = os.environ.get("SIMAGENT_MODEL", "claude-opus-4-8")
 
@@ -45,7 +57,9 @@ def resolve_backend(backend: str | None = None) -> str:
     return "api"  # let the API backend surface a clear auth error
 
 
-class VarModel(BaseModel):
+# -- the structured-output schema (mirrors claim/1 JSON) -----------------------
+
+class SpaceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
     shape: list[int]
@@ -54,23 +68,46 @@ class VarModel(BaseModel):
     kind: Literal["real", "int"] = "real"
 
 
-class SpecModel(BaseModel):
+class RecipeStepModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    ctor: str
+    args: list[str]
+
+
+class KindParamsModel(BaseModel):
+    """A registry selection: kind + free-form params (validated in Python)."""
+    model_config = ConfigDict(extra="allow")
+    kind: str
+
+
+class ClaimModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     title: str
     conjecture: str
     latex: str
     quantifier: Literal["forall", "exists"]
-    domain: list[VarModel]
-    check_code: str
-    scene_code: str
-    constraint_code: Optional[str] = None
-    certify_code: Optional[str] = None
+    spaces: list[SpaceModel]
+    recipe: list[RecipeStepModel] = []
+    measure: KindParamsModel
+    scene: KindParamsModel
+    constraint: Optional[KindParamsModel] = None
+    certify: Optional[KindParamsModel] = None
+    lean: Optional[KindParamsModel] = None
     lean_statement: str = ""
     notes: str = ""
 
 
-def _example_spec_json() -> str:
+def _registry_doc(name: str, registry: dict) -> str:
+    lines = [f"### {name}"]
+    for key, entry in registry.items():
+        params = ", ".join(entry.get("params", ()))
+        lines.append(f"- `{key}`({params}) — {entry['doc']}")
+    return "\n".join(lines)
+
+
+def _example_claim_json() -> str:
     from .library import get
 
     return json.dumps(get("circumcenter-in-triangle").to_json(), indent=2)
@@ -78,53 +115,49 @@ def _example_spec_json() -> str:
 
 def build_system_prompt() -> str:
     return f"""You are the formalization stage of SimAgent, a sandbox harness for
-exploring math conjectures. Convert the user's conjecture into a ProblemSpec:
-an executable, searchable, visualizable form of the statement.
+exploring math conjectures. Convert the user's conjecture into a native
+Claim: free entities in Spaces, a recipe of constructions, and a distinguished
+measure — ALL chosen from the closed registries below. You write NO code;
+you compose vocabulary. If the conjecture cannot be expressed with these
+registries, say so plainly in `notes` and pick the nearest faithful bounded
+form (or fail honestly).
 
-## Code contract (Python, exec'd with a fixed toolbox in scope)
+## Spaces (free entities)
+Declare each with name, shape (e.g. [3, 2] = 3 points in R^2; [] = scalar),
+bounds, kind. kind="real" = uniform box (sampled search); kind="int" =
+integer grid — if EVERY variable is an int grid with a small case count the
+harness checks every case (proof by exhaustion, its strongest move), so
+prefer faithful finite integer forms when possible. Keep coordinates O(1).
+Dimension is unrestricted (shape [5, 4] = 5 points in R^4 is fine); note
+that above d = 3 no Lean certificate exists yet (say so in notes).
 
-check(**vars) -> {{"holds": bool, "margin": float | None, "data": dict}}
-  - vars are numpy arrays shaped per the domain you declare.
-  - margin > 0 MUST be equivalent to holds == True; magnitude = robustness.
-    Provide a continuous margin whenever possible (it powers annealing);
-    use None only for genuinely discrete checks.
-build_scene(**vars) -> list of scene primitives (see below); make the
-  interesting object visually obvious (color the violating element red).
-valid(**vars) -> bool   (optional constraint_code; reject degenerate samples)
-certify(**vars) -> bool (optional certify_code; EXACT arithmetic only —
-  vars arrive as sympy Matrices/Rationals; return whether the property HOLDS.
-  Provide it whenever the property is decidable in rational arithmetic; it is
-  what upgrades a numeric finding into a mathematical certificate.)
+## Constructors (recipe steps; each defines a named derived entity)
+{_registry_doc("constructors", CONSTRUCTORS)}
 
-## Toolbox in scope for check/build_scene/valid
-np, math,
-circumcenter(pts), barycentric(pts, x), simplex_volume(pts)   # (n+1, n) simplex
-hull_counts(points3d) -> (V, E, F), hull_mesh(points3d) -> (vertices, faces)
-scene_points(coords, color=..., radius=..., name=...), scene_segments(pairs, ...),
-scene_polygon(coords, ...), scene_mesh(vertices, faces, ...),
-scene_sphere(center, radius, ...), scene_label(text)
+## Measures (the distinguished check; margin > 0 MUST mean the property holds)
+{_registry_doc("measures", MEASURES)}
 
-## Toolbox in scope for certify
-sp (sympy), exact_circumcenter(M), exact_barycentric(M, x)  # sympy Matrices
+## Constraints (optional validity filter)
+{_registry_doc("constraints", CONSTRAINTS)}
 
-## Domain
-Declare each variable with name, shape (e.g. [3, 2] = 3 points in R^2, [] =
-scalar), bounds, and kind. kind="real" is a uniform box (sampled search);
-kind="int" is an integer grid — if EVERY variable is an int grid with a small
-total case count, the harness checks every case (proof by exhaustion), which
-is the strongest thing it can do, so prefer finite integer domains whenever
-the conjecture allows a faithful bounded form. Keep coordinates O(1).
-quantifier: "forall" means the harness hunts counterexamples; "exists" means
-it hunts witnesses.
+## Certifiers (optional; exact rational re-decision — provide when applicable,
+it upgrades numeric findings into mathematical certificates)
+{_registry_doc("certifiers", CERTIFIERS)}
+
+## Lean hooks (optional; generated kernel certificates)
+{_registry_doc("lean hooks", LEANS)}
+
+## Scenes (how the claim renders)
+{_registry_doc("scenes", SCENES)}
 
 ## Honesty
 latex must faithfully state the conjecture. lean_statement is a Lean 4 /
 Mathlib statement of the *positive* conjecture (the harness negates it if
-disproved); if no clean Mathlib formulation exists, say so in a Lean comment.
-Use notes for caveats (e.g. discrete check = evidence only).
+disproved); if no clean formulation exists, say so in a Lean comment. Use
+notes for caveats (discrete measures = evidence only; d > 3 = no Lean cert).
 
-## Example spec (this exact JSON shape)
-{_example_spec_json()}
+## Example claim (this exact JSON shape)
+{_example_claim_json()}
 """
 
 
@@ -132,7 +165,7 @@ class FormalizeError(RuntimeError):
     pass
 
 
-def _request_spec(client, model: str, messages: list[dict]) -> dict:
+def _request_claim(client, model: str, messages: list[dict]) -> dict:
     """One structured-output request; parse() with a raw-schema fallback."""
     try:
         resp = client.messages.parse(
@@ -141,7 +174,7 @@ def _request_spec(client, model: str, messages: list[dict]) -> dict:
             thinking={"type": "adaptive"},
             system=build_system_prompt(),
             messages=messages,
-            output_format=SpecModel,
+            output_format=ClaimModel,
         )
         if resp.stop_reason == "refusal":
             raise FormalizeError("model refused the formalization request")
@@ -149,7 +182,7 @@ def _request_spec(client, model: str, messages: list[dict]) -> dict:
             raise FormalizeError(f"no parsed output (stop_reason={resp.stop_reason})")
         return resp.parsed_output.model_dump()
     except (AttributeError, TypeError):
-        schema = SpecModel.model_json_schema()
+        schema = ClaimModel.model_json_schema()
         resp = client.messages.create(
             model=model,
             max_tokens=16000,
@@ -164,13 +197,18 @@ def _request_spec(client, model: str, messages: list[dict]) -> dict:
         return json.loads(text)
 
 
+def claim_from_model_dump(data: dict) -> Claim:
+    """ClaimModel dump -> native Claim (the claim/1 shape plus format key)."""
+    return Claim.from_json({**data, "format": "claim/1"})
+
+
 def formalize(
     conjecture_text: str,
     model: str | None = None,
     max_repairs: int = 2,
     log=print,
-) -> ProblemSpec:
-    """Conjecture text -> validated ProblemSpec (with a repair loop)."""
+) -> Claim:
+    """Conjecture text -> validated native Claim (with a repair loop)."""
     import anthropic
 
     client = anthropic.Anthropic()
@@ -178,31 +216,34 @@ def formalize(
     messages: list[dict] = [
         {
             "role": "user",
-            "content": f"Formalize this conjecture into a ProblemSpec:\n\n{conjecture_text}",
+            "content": f"Formalize this conjecture into a native Claim:\n\n{conjecture_text}",
         }
     ]
     errors: list[str] = []
     for attempt in range(max_repairs + 1):
         log(f"[llm] formalize attempt {attempt + 1} (model={model})")
-        spec_dict = _request_spec(client, model, messages)
-        spec = ProblemSpec.from_json(spec_dict)
-        errors = validate_spec(spec)
+        claim_dict = _request_claim(client, model, messages)
+        try:
+            claim = claim_from_model_dump(claim_dict)
+            errors = validate_claim(claim)
+        except Exception as e:  # noqa: BLE001 - malformed structure is a repairable error
+            errors = [f"{type(e).__name__}: {e}"]
         if not errors:
-            log(f"[llm] spec '{spec.id}' validated against the sandbox")
-            return spec
-        log(f"[llm] spec failed validation: {errors}")
-        messages.append({"role": "assistant", "content": json.dumps(spec_dict)})
+            log(f"[llm] claim '{claim.id}' validated against the sandbox")
+            return claim
+        log(f"[llm] claim failed validation: {errors}")
+        messages.append({"role": "assistant", "content": json.dumps(claim_dict)})
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    "That spec failed sandbox validation:\n- "
+                    "That claim failed sandbox validation:\n- "
                     + "\n- ".join(errors)
-                    + "\nReturn a corrected, complete spec (all fields)."
+                    + "\nReturn a corrected, complete claim (all fields, registry keys only)."
                 ),
             }
         )
-    raise FormalizeError(f"spec failed validation after {max_repairs + 1} attempts: {errors}")
+    raise FormalizeError(f"claim failed validation after {max_repairs + 1} attempts: {errors}")
 
 
 class ProofAttemptModel(BaseModel):
@@ -225,7 +266,7 @@ class ProofAttemptModel(BaseModel):
     lean_code: Optional[str] = None
 
 
-PROOF_SYSTEM = """You are the proof stage of SimAgent. Given a ProblemSpec and
+PROOF_SYSTEM = """You are the proof stage of SimAgent. Given a claim and
 the sandbox search report, produce ONE proof attempt.
 
 Rules (the harness enforces them; do not fight them):
@@ -246,7 +287,7 @@ Rules (the harness enforces them; do not fight them):
   unverified, which is the honest outcome."""
 
 
-def attempt_proof(spec: ProblemSpec, report_json: dict, model: str | None = None) -> dict:
+def attempt_proof(spec, report_json: dict, model: str | None = None) -> dict:
     """One structured deductive proof attempt: {method, argument, lean_code}."""
     import anthropic
 
@@ -260,7 +301,7 @@ def attempt_proof(spec: ProblemSpec, report_json: dict, model: str | None = None
             {
                 "role": "user",
                 "content": (
-                    "ProblemSpec:\n```json\n"
+                    "Claim:\n```json\n"
                     + json.dumps(spec.to_json(), indent=2)
                     + "\n```\n\nSearch report:\n```json\n"
                     + json.dumps(report_json, indent=2)

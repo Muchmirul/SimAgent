@@ -1,63 +1,12 @@
-"""'The circumcenter of a triangle lies inside it' — famously false (obtuse
-triangles). The simplest full tour of the pipeline: search finds an obtuse
-triangle, annealing makes it robust, sympy certifies exact rational
-coordinates, and the scene shows the circumcircle with its center outside."""
-from ..spec import ProblemSpec, VarSpec
+"""Ground truth: FALSE — the circumcenter escapes every obtuse triangle
+(Thales: it lies inside iff the triangle is acute). The search finds an
+obtuse triangle, exact rationals certify it, Lean kernel-checks the
+certificate. Native claim: no exec'd code — recipe + registries only.
+This claim doubles as the LLM formalizer's few-shot example."""
+from ..core.claim import Claim
+from ..core.space import Box
 
-CHECK = '''
-def check(T):
-    c = circumcenter(T)
-    w = barycentric(T, c)
-    m = float(w.min())
-    return {
-        "holds": m > 0,
-        "margin": m,
-        "data": {"circumcenter": c.tolist(), "barycentric": w.tolist()},
-    }
-'''
-
-CONSTRAINT = '''
-def valid(T):
-    return simplex_volume(T) > 0.05
-'''
-
-SCENE = '''
-def build_scene(T):
-    c = circumcenter(T)
-    w = barycentric(T, c)
-    inside = w.min() > 0
-    r = float(np.linalg.norm(c - T[0]))
-    edges = [(T[0], T[1]), (T[1], T[2]), (T[2], T[0])]
-    return [
-        scene_polygon(T, color="#4a90d9", opacity=0.45),
-        scene_segments(edges, color="#dfe3e8", width=3.0),
-        scene_sphere(c, r, color="#f2c14e", opacity=0.10),
-        scene_points(T, color="#ffffff", radius=0.05),
-        scene_points([c], color="#2ecc71" if inside else "#e74c3c", radius=0.07,
-                     name="circumcenter"),
-        scene_label("circumcenter %s (min barycentric = %.3f)"
-                    % ("inside" if inside else "OUTSIDE", w.min())),
-    ]
-'''
-
-CERTIFY = '''
-def certify(T):
-    c = exact_circumcenter(T)
-    w = exact_barycentric(T, c)
-    return all(x > 0 for x in w)
-'''
-
-LEAN_CERT = '''
-def lean_certificate(T):
-    return lean_simplex_circumcenter(
-        T,
-        theorem="circumcenter_in_triangle_disproof_witness",
-        title="Witness triangle whose circumcenter lies outside it "
-              "(disproves: the circumcenter lies inside every triangle)",
-    )
-'''
-
-SPEC = ProblemSpec(
+CLAIM = Claim(
     id="circumcenter-in-triangle",
     title="Circumcenter lies inside every triangle",
     conjecture=(
@@ -69,18 +18,34 @@ SPEC = ProblemSpec(
         r"O(A,B,C) \in \operatorname{int}\,\triangle ABC"
     ),
     quantifier="forall",
-    domain=[VarSpec(name="T", shape=[3, 2], low=-1.2, high=1.2)],
-    check_code=CHECK,
-    scene_code=SCENE,
-    constraint_code=CONSTRAINT,
-    certify_code=CERTIFY,
-    lean_certificate_code=LEAN_CERT,
+    spaces={"T": Box(shape=(3, 2), low=-1.2, high=1.2)},
+    recipe=[
+        {"name": "circumcenter", "ctor": "circumcenter", "args": ["T"]},
+        {"name": "barycentric", "ctor": "barycentric", "args": ["T", "circumcenter"]},
+    ],
+    measure={"kind": "min_coord", "of": "barycentric"},
+    constraint={"kind": "min_volume", "of": "T", "threshold": 0.05},
+    certify={"kind": "simplex_circumcenter_inside", "of": "T"},
+    lean={
+        "kind": "simplex_circumcenter",
+        "of": "T",
+        "theorem": "circumcenter_in_triangle_disproof_witness",
+        "title": (
+            "Witness triangle whose circumcenter lies outside it "
+            "(disproves: the circumcenter lies inside every triangle)"
+        ),
+    },
+    scene={"kind": "simplex", "of": "T", "center": "circumcenter", "weights": "barycentric"},
     lean_statement=(
-        "∀ (s : Affine.Simplex ℝ (EuclideanSpace ℝ (Fin 2)) 2),\n"
-        "    s.circumcenter ∈ interior (convexHull ℝ (Set.range s.points))"
+        "theorem circumcenter_in_triangle\n"
+        "    (T : Affine.Simplex ℝ (EuclideanSpace ℝ (Fin 2)) 2) :\n"
+        "    T.circumcenter ∈ interior (convexHull ℝ (Set.range T.points)) := by\n"
+        "  sorry"
     ),
     notes=(
-        "False: any obtuse triangle has its circumcenter outside. The margin "
-        "is the minimum barycentric coordinate of the circumcenter."
+        "False: the circumcenter lies inside iff the triangle is acute "
+        "(Thales). Any obtuse triangle is a counterexample."
     ),
 )
+
+SPEC = CLAIM  # historical alias; claims are spec-like

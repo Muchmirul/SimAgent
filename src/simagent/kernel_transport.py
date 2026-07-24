@@ -1,0 +1,412 @@
+"""Standalone JSONL transport for the SimAgent Python kernel.
+
+This module is intentionally provider- and UI-agnostic.  A controller sends
+one LF-delimited JSON request at a time; the transport delegates every tool to
+:class:`simagent.agent.AgentRun`, then returns text/image content blocks.  It
+adds correlation and replay plumbing only: proof construction and verdicts
+remain in the existing Python kernel.
+
+Protocol (one response for every request)::
+
+    {"id":"1", "op":"describe"}
+    {"id":"2", "op":"call", "toolCallId":"call-7",
+     "name":"look", "args":{}}
+    {"id":"3", "op":"snapshot"}
+    {"id":"4", "op":"finalize"}
+
+The append-only ``kernel-journal.jsonl`` stores every accepted or rejected
+call, its unchanged Pi ``toolCallId``, and a hash of the resulting kernel
+state.  A new transport can replay a journal prefix; replay fails closed if
+any state hash differs from the source entry.
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any, TextIO
+
+import numpy as np
+
+from .agent import AgentRun, SYSTEM, TOOLS, _task_prompt
+from .library import get as get_bundled
+from .spec import ProblemSpec
+
+JOURNAL_FILE = "kernel-journal.jsonl"
+JOURNAL_VERSION = 1
+
+
+class KernelReplayError(RuntimeError):
+    """Raised when a journal prefix cannot be reproduced exactly."""
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert kernel values to stable, strict-JSON data."""
+    if dataclasses.is_dataclass(value):
+        return _jsonable(dataclasses.asdict(value))
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        return _jsonable(value.item())
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _proof_state(run: AgentRun) -> dict[str, Any] | None:
+    """Canonical proof-attempt state, excluding output-directory artifacts."""
+    if run.deductive is None:
+        return None
+    proof = run.deductive
+    return {
+        "method": proof.method.value,
+        "claim": proof.claim,
+        "verifiedBy": proof.verified_by,
+        "argument": proof.argument,
+        "witness": proof.witness,
+        "statementReview": proof.statement_review,
+        "leanOk": (proof.lean_report or {}).get("ok"),
+        "leanAxiomClean": (proof.lean_report or {}).get("axiom_clean"),
+    }
+
+
+def _state(run: AgentRun) -> dict[str, Any]:
+    """Replay-relevant state; no presentation artifact can affect its hash."""
+    report = run.best_report()
+    return _jsonable(
+        {
+            "vars": run.session.vars,
+            "check": run.session._check(),
+            "rngState": run.session.rng.bit_generator.state,
+            "huntSeed": run.session._hunt_seed,
+            "finished": run.finished,
+            "stopRequested": run.stop_requested,
+            "summary": run.summary,
+            "declaredPlans": run.declared_plans,
+            "bestReport": report,
+            "deductiveProof": _proof_state(run),
+        }
+    )
+
+
+def _state_hash(state: dict[str, Any]) -> str:
+    payload = json.dumps(
+        state, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _result_summary(content: str | list[dict]) -> Any:
+    """Journal a useful result without duplicating base64 image payloads."""
+    if isinstance(content, str):
+        return content
+    summary: list[dict[str, Any]] = []
+    for block in content:
+        if block.get("type") == "image":
+            source = block.get("source") or {}
+            summary.append(
+                {
+                    "type": "image",
+                    "mimeType": source.get("media_type"),
+                    "base64Chars": len(source.get("data") or ""),
+                }
+            )
+        else:
+            summary.append(_jsonable(block))
+    return summary
+
+
+def _transport_content(content: str | list[dict]) -> list[dict[str, Any]]:
+    """Translate the legacy Anthropic-shaped image block to neutral blocks."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    blocks: list[dict[str, Any]] = []
+    for block in content:
+        if block.get("type") == "image":
+            source = block["source"]
+            blocks.append(
+                {
+                    "type": "image",
+                    "data": source["data"],
+                    "mimeType": source["media_type"],
+                }
+            )
+        elif block.get("type") == "text":
+            blocks.append({"type": "text", "text": str(block.get("text", ""))})
+        else:
+            raise TypeError(f"unsupported kernel result block: {block.get('type')!r}")
+    return blocks
+
+
+def read_journal(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read a complete journal, ignoring only a malformed trailing partial line."""
+    records: list[dict[str, Any]] = []
+    lines = Path(path).read_text().splitlines()
+    for index, line in enumerate(lines):
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise KernelReplayError(f"malformed journal line {index + 1}") from None
+    if not records or records[0].get("event") != "header":
+        raise KernelReplayError("journal has no valid header")
+    return records[0], [r for r in records[1:] if r.get("event") == "call"]
+
+
+class KernelTransport:
+    """One mutable :class:`AgentRun` behind an append-only replay journal."""
+
+    def __init__(
+        self,
+        spec: ProblemSpec,
+        out_dir: str | Path,
+        *,
+        replay_journal: str | Path | None = None,
+        replay_through: int | None = None,
+    ):
+        if replay_journal is None and replay_through is not None:
+            raise ValueError("replay_through requires replay_journal")
+        self.out = Path(out_dir)
+        journal_path = self.out / JOURNAL_FILE
+        if journal_path.exists():
+            raise FileExistsError(f"refusing to overwrite existing journal: {journal_path}")
+        self.run = AgentRun(spec, self.out)
+        self.path = journal_path
+        self._fh = self.path.open("x", encoding="utf-8")
+        self._closed = False
+        self.journal_seq = 0
+        self._write(
+            {
+                "event": "header",
+                "version": JOURNAL_VERSION,
+                "specId": spec.id,
+                "state": _state(self.run),
+                "stateHash": _state_hash(_state(self.run)),
+                "provenance": (
+                    {
+                        "journal": str(Path(replay_journal).resolve()),
+                        "through": replay_through,
+                    }
+                    if replay_journal is not None
+                    else None
+                ),
+            }
+        )
+        if replay_journal is not None:
+            self._replay(replay_journal, replay_through)
+
+    def _write(self, record: dict[str, Any]) -> None:
+        self._fh.write(json.dumps(_jsonable(record), ensure_ascii=False, allow_nan=False) + "\n")
+        self._fh.flush()
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "protocolVersion": 1,
+            "journalVersion": JOURNAL_VERSION,
+            "specId": self.run.spec.id,
+            "systemPrompt": SYSTEM,
+            "taskPrompt": _task_prompt(self.run.spec),
+            "tools": TOOLS,
+            "journalPath": str(self.path.resolve()),
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        state = _state(self.run)
+        return {
+            "journalSeq": self.journal_seq,
+            "journalPath": str(self.path.resolve()),
+            "state": state,
+            "stateHash": _state_hash(state),
+            "finished": self.run.finished,
+        }
+
+    def call_tool(self, tool_call_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("kernel transport is finalized")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            raise ValueError("toolCallId must be a non-empty string")
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool name must be a non-empty string")
+        if not isinstance(args, dict):
+            raise ValueError("tool args must be an object")
+
+        content, is_error = self.run.dispatch(name, args, tool_call_id=tool_call_id)
+        self.journal_seq += 1
+        state = _state(self.run)
+        digest = _state_hash(state)
+        self._write(
+            {
+                "event": "call",
+                "seq": self.journal_seq,
+                "toolCallId": tool_call_id,
+                "tool": name,
+                "args": args,
+                "result": _result_summary(content),
+                "isError": is_error,
+                "finished": self.run.finished,
+                "state": state,
+                "stateHash": digest,
+            }
+        )
+        return {
+            "toolCallId": tool_call_id,
+            "content": _transport_content(content),
+            "isError": is_error,
+            "finished": self.run.finished,
+            "journalSeq": self.journal_seq,
+            "journalPath": str(self.path.resolve()),
+            "state": state,
+            "stateHash": digest,
+        }
+
+    def _replay(self, source: str | Path, through: int | None) -> None:
+        header, calls = read_journal(source)
+        if header.get("version") != JOURNAL_VERSION:
+            raise KernelReplayError(
+                f"unsupported journal version {header.get('version')!r}; expected {JOURNAL_VERSION}"
+            )
+        if header.get("specId") != self.run.spec.id:
+            raise KernelReplayError(
+                f"journal spec {header.get('specId')!r} != requested {self.run.spec.id!r}"
+            )
+        initial = self.snapshot()["stateHash"]
+        if initial != header.get("stateHash"):
+            raise KernelReplayError("initial kernel state does not match journal header")
+
+        max_seq = max((int(entry.get("seq", 0)) for entry in calls), default=0)
+        limit = max_seq if through is None else through
+        if not isinstance(limit, int) or limit < 0 or limit > max_seq:
+            raise KernelReplayError(f"invalid replay prefix {limit!r}; journal tip is {max_seq}")
+        expected_seq = 1
+        for entry in calls:
+            seq = int(entry.get("seq", 0))
+            if seq > limit:
+                break
+            if seq != expected_seq:
+                raise KernelReplayError(
+                    f"journal call sequence is not contiguous at {seq}; expected {expected_seq}"
+                )
+            result = self.call_tool(
+                str(entry.get("toolCallId") or ""),
+                str(entry.get("tool") or ""),
+                dict(entry.get("args") or {}),
+            )
+            if result["isError"] != bool(entry.get("isError")):
+                raise KernelReplayError(f"replay error status diverged at call {seq}")
+            if result["stateHash"] != entry.get("stateHash"):
+                raise KernelReplayError(f"replay state diverged at call {seq}")
+            expected_seq += 1
+        if self.journal_seq != limit:
+            raise KernelReplayError(
+                f"replayed {self.journal_seq} calls but prefix requested {limit}"
+            )
+
+    def finalize(self) -> dict[str, Any]:
+        if self._closed:
+            return {"alreadyFinalized": True, **self.snapshot()}
+        proof, report, artifacts = self.run.finalize()
+        state = _state(self.run)
+        result = {
+            "proof": _jsonable(proof),
+            "report": _jsonable(report),
+            "artifacts": _jsonable(artifacts),
+            "journalSeq": self.journal_seq,
+            "journalPath": str(self.path.resolve()),
+            "state": state,
+            "stateHash": _state_hash(state),
+            "finished": self.run.finished,
+        }
+        self._write({"event": "end", **result})
+        self._fh.close()
+        self._closed = True
+        return result
+
+
+def _load_spec(problem_id: str | None, spec_path: str | None) -> ProblemSpec:
+    if bool(problem_id) == bool(spec_path):
+        raise ValueError("provide exactly one of --problem-id or --spec")
+    return get_bundled(problem_id) if problem_id else ProblemSpec.load(spec_path)
+
+
+def serve(transport: KernelTransport, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
+    """Serve strict LF-delimited JSON until ``finalize`` or EOF."""
+    try:
+        for raw in stdin:
+            request_id: Any = None
+            request: dict[str, Any] = {}
+            try:
+                request = json.loads(raw)
+                if not isinstance(request, dict):
+                    raise ValueError("request must be a JSON object")
+                request_id = request.get("id")
+                op = request.get("op")
+                if op == "describe":
+                    result = transport.describe()
+                elif op == "snapshot":
+                    result = transport.snapshot()
+                elif op == "call":
+                    result = transport.call_tool(
+                        request.get("toolCallId"), request.get("name"), request.get("args") or {}
+                    )
+                elif op == "finalize":
+                    result = transport.finalize()
+                else:
+                    raise ValueError(f"unsupported operation {op!r}")
+                response = {"id": request_id, "ok": True, "result": result}
+            except Exception as exc:  # fail closed, but keep protocol synchronized
+                response = {
+                    "id": request_id,
+                    "ok": False,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
+            stdout.write(json.dumps(response, ensure_ascii=False, allow_nan=False) + "\n")
+            stdout.flush()
+            if request.get("op") == "finalize" and response["ok"]:
+                return
+    finally:
+        if not transport._closed:
+            transport.finalize()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SimAgent kernel JSONL transport")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--problem-id", help="bundled problem id")
+    source.add_argument("--spec", help="path to a ProblemSpec JSON file")
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--replay-journal")
+    parser.add_argument("--replay-through", type=int)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        spec = _load_spec(args.problem_id, args.spec)
+        transport = KernelTransport(
+            spec,
+            args.out_dir,
+            replay_journal=args.replay_journal,
+            replay_through=args.replay_through,
+        )
+        serve(transport)
+        return 0
+    except Exception as exc:
+        print(f"kernel transport failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

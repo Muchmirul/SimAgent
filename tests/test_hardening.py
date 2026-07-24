@@ -1,15 +1,18 @@
 """Regression tests for the post-audit soundness/honesty hardening.
 
 Each test pins one finding from the adversarial review so a future change that
-reopens the hole fails loudly.
+reopens the hole fails loudly. (P5 note: bundled problems are now immutable
+native Claims, so the bad-domain cases are constructed directly instead of
+mutating a bundled object — the invariants under test are unchanged.)
 """
-import copy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from simagent import lean_check
 from simagent.library import get, is_bundled
+from simagent.core.claim import Claim
 from simagent.proof import Method, mechanized_proof
 from simagent.search import (
     case_count,
@@ -22,12 +25,19 @@ from simagent.spec import ProblemSpec, VarSpec, sample_vars, validate_spec
 lean = pytest.mark.skipif(not lean_check.lean_available(), reason="no Lean toolchain")
 
 
+def _int_domain_spec(low, high, shape=()):
+    """Minimal spec-like with an integer domain (duck-typed for the samplers)."""
+    return SimpleNamespace(
+        id="bad-int-domain",
+        quantifier="forall",
+        domain=[SimpleNamespace(name="n", shape=list(shape), low=low, high=high, kind="int")],
+    )
+
+
 # ---- exhaustion soundness -------------------------------------------------
 
 def test_case_count_rejects_inverted_and_empty_domains():
-    spec = get("sum-of-odds-square")
-    bad = copy.deepcopy(spec)
-    bad.domain[0].low, bad.domain[0].high = 200, 0  # inverted
+    bad = _int_domain_spec(low=200, high=0)  # inverted
     assert case_count(bad) == 0
     assert not exhaustible(bad)
     with pytest.raises(ValueError):
@@ -35,9 +45,7 @@ def test_case_count_rejects_inverted_and_empty_domains():
 
 
 def test_case_count_no_int64_overflow_on_huge_shapes():
-    spec = get("sum-of-odds-square")
-    huge = copy.deepcopy(spec)
-    huge.domain[0].shape = [1000000]  # would overflow np.prod-based entry count
+    huge = _int_domain_spec(low=0, high=200, shape=[1000000])
     # python-int arithmetic -> astronomically large but correct, not 1
     assert case_count(huge) > 10**100
     assert not exhaustible(huge)
@@ -46,8 +54,7 @@ def test_case_count_no_int64_overflow_on_huge_shapes():
 def test_int_domain_exact_guard():
     spec = get("sum-of-odds-square")
     assert int_domain_exact(spec)
-    unsafe = copy.deepcopy(spec)
-    unsafe.domain[0].high = 2**50  # beyond the 2^40 safe bound
+    unsafe = _int_domain_spec(low=0, high=2**50)  # beyond the 2^40 safe bound
     assert not int_domain_exact(unsafe)
 
 
@@ -106,7 +113,7 @@ def test_statement_review_flags_non_bundled_specs():
     assert bundled_proof.statement_review == "bundled-trusted"
 
     # a disk round-trip yields a different object -> untrusted
-    reloaded = ProblemSpec.from_json(spec.to_json())
+    reloaded = Claim.from_json(spec.to_json())
     assert not is_bundled(reloaded)
     untrusted_proof = mechanized_proof(reloaded, report, spec_trusted=is_bundled(reloaded))
     assert untrusted_proof.statement_review == "spec-generated-review-needed"
@@ -114,20 +121,23 @@ def test_statement_review_flags_non_bundled_specs():
 
 # ---- spec validation ------------------------------------------------------
 
+def _legacy_int_spec(**var_kw):
+    return ProblemSpec(
+        id="legacy-int", title="t", conjecture="c", latex="l", quantifier="forall",
+        domain=[VarSpec(name="n", shape=[], **var_kw)],
+        check_code="def check(n):\n    return {'holds': True, 'margin': None, 'data': {}}",
+        scene_code="def build_scene(n):\n    return [scene_label(str(n))]",
+    )
+
+
 def test_validate_rejects_bad_kind_and_bounds():
-    base = get("sum-of-odds-square").to_json()
-    bad_kind = ProblemSpec.from_json({**base, "domain": [{"name": "n", "shape": [], "low": 0, "high": 5, "kind": "integer"}]})
-    assert any("kind" in e for e in validate_spec(bad_kind))
-    inverted = ProblemSpec.from_json({**base, "domain": [{"name": "n", "shape": [], "low": 5, "high": 0, "kind": "int"}]})
-    assert any("<=" in e for e in validate_spec(inverted))
+    assert any("kind" in e for e in validate_spec(_legacy_int_spec(low=0, high=5, kind="integer")))
+    assert any("<=" in e for e in validate_spec(_legacy_int_spec(low=5, high=0, kind="int")))
 
 
 def test_sample_vars_friendly_error_on_inverted_int():
-    spec = get("sum-of-odds-square")
-    bad = copy.deepcopy(spec)
-    bad.domain[0].low, bad.domain[0].high = 5, 0
     with pytest.raises(ValueError, match="low"):
-        sample_vars(np.random.default_rng(0), bad)
+        sample_vars(np.random.default_rng(0), _int_domain_spec(low=5, high=0))
 
 
 # ---- lean_check hardening -------------------------------------------------

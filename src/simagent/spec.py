@@ -1,13 +1,20 @@
-"""ProblemSpec: the contract between a conjecture, the sandbox, and the search.
+"""ProblemSpec: the LEGACY exec'd-code contract (deprecated since P5).
 
-A spec carries the same conjecture in four forms:
+New problems are native Claims (simagent.core.claim): a closed vocabulary of
+spaces + constructor recipes + registry measures, with NO exec'd code. The
+bundled library and the LLM formalizer emit Claims only. This module remains
+solely to load old disk spec.json files and to support legacy-format tests
+during the compatibility window (`ProblemSpec.load` routes claim/1 documents
+to Claim automatically); it is scheduled for deletion once that window closes.
+
+A legacy spec carries the same conjecture in four forms:
   - natural language + LaTeX (for humans),
   - executable code strings (for the sandbox and the search),
   - a Lean statement skeleton (for formalization).
 
-Code fields are *strings* so a spec is JSON-serializable end to end — this is
-exactly the format the LLM formalizer emits. Strings are compiled with the
-sandbox toolbox in scope (numpy + geometry/scene/certify helpers).
+Code fields are *strings* so a spec is JSON-serializable end to end. Strings
+are compiled with the sandbox toolbox in scope (numpy + geometry/scene/certify
+helpers).
 
 Code contract (enforced by validate_spec / the search):
   check(**vars)       -> {"holds": bool, "margin": float | None, "data": dict}
@@ -71,6 +78,11 @@ class ProblemSpec:
 
     @staticmethod
     def from_json(d: dict) -> "ProblemSpec":
+        if d.get("format", "").startswith("claim/"):
+            raise ValueError(
+                "this is a native claim document — load it with "
+                "simagent.core.claim.Claim.from_json (ProblemSpec.load routes automatically)"
+            )
         d = dict(d)
         d["domain"] = [VarSpec(**v) for v in d.get("domain", [])]
         return ProblemSpec(**d)
@@ -80,9 +92,17 @@ class ProblemSpec:
             json.dump(self.to_json(), f, indent=2)
 
     @staticmethod
-    def load(path) -> "ProblemSpec":
+    def load(path):
+        """Load a problem document: native claim JSON (claim/1) or a legacy
+        exec'd-code spec. New documents should be claims; the exec path is
+        deprecated and kept only for old disk specs."""
         with open(path) as f:
-            return ProblemSpec.from_json(json.load(f))
+            data = json.load(f)
+        if isinstance(data, dict) and str(data.get("format", "")).startswith("claim/"):
+            from .core.claim import Claim
+
+            return Claim.from_json(data)
+        return ProblemSpec.from_json(data)
 
     def compiled(self) -> "CompiledSpec":
         return CompiledSpec(self)
@@ -121,15 +141,19 @@ def certify_toolbox() -> dict:
 
 
 def sample_vars(rng: np.random.Generator, spec: "ProblemSpec") -> dict[str, np.ndarray]:
-    """The one authoritative domain sampler (used by search, play, web, CLI)."""
+    """The one authoritative domain sampler (used by search, play, web, CLI).
+
+    Sampling now lives in core.space (the input boundary); this wrapper keeps
+    the single-sampler invariant and the historical per-var error message.
+    """
+    from .core.space import from_varspec
+
     out: dict[str, np.ndarray] = {}
     for v in spec.domain:
-        if v.kind == "int":
-            if int(v.high) < int(v.low):
-                raise ValueError(f"{v.name}: integer domain has low ({v.low}) > high ({v.high})")
-            out[v.name] = rng.integers(int(v.low), int(v.high) + 1, size=tuple(v.shape)).astype(float)
-        else:
-            out[v.name] = rng.uniform(v.low, v.high, size=tuple(v.shape))
+        try:
+            out[v.name] = from_varspec(v).sample(rng)
+        except ValueError as e:
+            raise ValueError(f"{v.name}: {e}") from None
     return out
 
 

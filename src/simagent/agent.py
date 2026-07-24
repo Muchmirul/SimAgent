@@ -52,6 +52,15 @@ picture — and the harness translates each new state into equations for the
 record. Equations are the translation of what you see, not the medium of
 thought.
 
+Your senses go beyond `look`: `measure` describes the state qualitatively
+(inside/outside, which face, how near the boundary); `view kind=field` paints
+the margin over a 2D slice of configuration space — the red region is where
+the claim FAILS and the zero-contour is the SHAPE of the claim's boundary
+(recognize that shape and you have a conjecture); `view kind=sweep` plots the
+margin along one coordinate. `imagine` runs a thought experiment on a fork of
+the world (Einstein's move: picture it first); the mainline is untouched —
+re-issue the ops for real when the picture looks right.
+
 Declare your line of attack with `plan` (method + one-line idea) before your
 first substantive act, and declare again whenever you switch strategy. The
 declaration is recorded as intent — it never becomes the verdict; what you
@@ -131,6 +140,42 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "measure",
+        "description": "Perceptual measurement of the current configuration: qualitative predicates (inside/outside, which face, near the boundary) plus margin — the compressed description a mathematician would give.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "view",
+        "description": "Render an analytical view. kind='field': margin painted over a 2D slice of configuration space (vary two coordinates of one row; zero-contour = the claim's boundary SHAPE — read it!). kind='sweep': margin along one coordinate with zero crossings. kind='trajectory': margin vs step so far.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["field", "sweep", "trajectory"]},
+                "var": {"type": "string"},
+                "row": {"type": "integer"},
+                "xi": {"type": "integer"},
+                "yi": {"type": "integer"},
+                "coord": {"type": "integer"},
+                "resolution": {"type": "integer"},
+            },
+            "required": ["kind"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "imagine",
+        "description": "Thought experiment (Einstein-style): apply ops to a FORK of the world, see the outcomes and a ghost image, then the fork is discarded — the real configuration is untouched. ops entries: {\"op\":\"set\"|\"nudge\",\"target\":name,\"row\":int,\"values\"|\"delta\":[...]}. Kernel actions (certify/exhaust/hunt/lean) are forbidden here: truth only runs on committed state. If the imagined picture looks right, re-issue the ops for real.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ops": {"type": "array", "items": {"type": "object"}},
+                "look": {"type": "boolean"},
+            },
+            "required": ["ops"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "refine",
         "description": "Anneal the current configuration toward violation (forall) or witness (exists).",
         "input_schema": {
@@ -169,6 +214,34 @@ TOOLS = [
                 "lean_code": {"type": "string"},
             },
             "required": ["method", "argument"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "construct",
+        "description": "Sketch: add a named derived object to the scene (midpoint, centroid, circumcenter, barycentric, segment, simplex_volume, vertex). It renders in every later look and recomputes automatically when its ancestors move — your auxiliary construction, like drawing a line in a proof.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "ctor": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name", "ctor", "args"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "expect",
+        "description": "Declare a falsifiable prediction BEFORE acting (e.g. margin < 0 after the next move). The harness scores it mechanically against later committed state — prediction error is how you learn the scene's dynamics. Relations: '<', '<=', '>', '>=', 'holds', 'fails'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "relation": {"type": "string", "enum": ["<", "<=", ">", ">=", "holds", "fails"]},
+                "value": {"type": "number"},
+                "note": {"type": "string"},
+            },
+            "required": ["relation"],
             "additionalProperties": False,
         },
     },
@@ -243,6 +316,8 @@ class AgentRun:
         self.out = Path(out_dir)
         self.out.mkdir(parents=True, exist_ok=True)
         (self.out / "looks").mkdir(exist_ok=True)
+        (self.out / "views").mkdir(exist_ok=True)
+        (self.out / "imagined").mkdir(exist_ok=True)
         self.session = SandboxSession(spec, self.out)
         self.looks = 0
         self.seq = 0
@@ -257,8 +332,15 @@ class AgentRun:
         # in the web UI's Mind panel (narrative only — proof.json stays boss).
         self.trace = TraceRecorder(self.out)
         self.trace.seed(self.session.vars, self.session._check())
+        self.views_taken = 0
+        self.imaginings = 0
+        self.open_expectations: list[dict] = []  # scored on later committed steps
+        self._expectation_seq = 0
         self._step_extra: dict | None = None
         self._step_image: str | None = None
+        self._step_mode: str = "commit"
+        self._step_branch: dict | None = None
+        self._step_state: tuple | None = None  # (vars, check, scene) override
 
     def note_thought(self, text: str | None, kind: str = "text") -> None:
         """Backends feed the model's narrative/thinking here; it attaches to
@@ -275,14 +357,25 @@ class AgentRun:
 
     # -- tool dispatch -------------------------------------------------------
 
-    def dispatch(self, name: str, args: dict):
-        """Returns (content, is_error): content is str or a content-block list."""
+    def dispatch(self, name: str, args: dict, *, tool_call_id: str | None = None):
+        """Returns (content, is_error): content is str or a content-block list.
+
+        ``tool_call_id`` is transport metadata only.  Carrying it into the
+        transcript and trace lets an external runtime correlate its session
+        entries with kernel actions without giving that runtime any verdict
+        authority.
+        """
         self.seq += 1
         self._step_extra = None
         self._step_image = None
+        self._step_mode = "commit"
+        self._step_branch = None
+        self._step_state = None
         try:
             if self.stop_requested and name != "finish":
                 raise RuntimeError("session stopped by the user; no further actions will run")
+            if self.finished and name != "finish":
+                raise RuntimeError("session already finished; no further actions will run")
             handler = getattr(self, f"_t_{name}", None)
             if handler is None:
                 content, is_error = f"unknown tool {name!r}", True
@@ -295,6 +388,7 @@ class AgentRun:
             json.dumps(
                 {
                     "seq": self.seq,
+                    "toolCallId": tool_call_id,
                     "tool": name,
                     "args": args,
                     "result": result_text,
@@ -304,17 +398,34 @@ class AgentRun:
             + "\n"
         )
         self._transcript.flush()
+        if self._step_state is not None:  # imagine: journal the hypothetical state
+            step_vars, step_check, step_scene = self._step_state
+        else:
+            step_vars, step_check, step_scene = (
+                self.session.vars, self.session._check(), self.session.scene()
+            )
+        # Predictions score only against COMMITTED state, and never against
+        # the expect/plan bookkeeping steps themselves.
+        if (self._step_mode == "commit" and not is_error
+                and name not in ("expect", "plan", "finish")):
+            resolved = self._resolve_expectations(step_check)
+            if resolved:
+                self._step_extra = {**(self._step_extra or {}),
+                                    "resolved_expectations": resolved}
         self.trace.record(
+            tool_call_id=tool_call_id,
             tool=name,
             args=args,
             result=result_text,
             error=is_error,
             spec=self.spec,
-            vars=self.session.vars,
-            check=self.session._check(),
-            scene=self.session.scene(),
+            vars=step_vars,
+            check=step_check,
+            scene=step_scene,
             extra=self._step_extra,
             image=self._step_image,
+            mode=self._step_mode,
+            branch=self._step_branch,
         )
         return content, is_error
 
@@ -361,6 +472,115 @@ class AgentRun:
     def _t_check(self):
         return self._status()
 
+    def _t_measure(self):
+        from .core.measure import measure_state
+
+        state = measure_state(self.spec, self.session.vars, self.session._check())
+        return json.dumps(state, default=str)[:MAX_TOOL_CHARS]
+
+    def _t_view(self, kind: str, var: str | None = None, row: int = 0,
+                xi: int = 0, yi: int = 1, coord: int = 0, resolution: int = 48):
+        from . import views as views_mod
+        from .trace import read_trace
+
+        self.views_taken += 1
+        path = self.out / "views" / f"view_{self.views_taken:03d}_{kind}.png"
+        if kind == "field":
+            _, meta = views_mod.render_field(
+                self.spec, self.session.comp, self.session.vars, path,
+                var=var, row=row, xi=xi, yi=yi, resolution=max(8, min(resolution, 96)),
+            )
+        elif kind == "sweep":
+            _, meta = views_mod.render_sweep(
+                self.spec, self.session.comp, self.session.vars, path,
+                var=var, row=row, coord=coord, resolution=max(8, min(resolution, 400)),
+            )
+        elif kind == "trajectory":
+            steps = read_trace(self.out)["steps"]
+            _, meta = views_mod.render_trajectory(steps, path, title=self.spec.title)
+        else:
+            raise ValueError(f"unknown view kind {kind!r}")
+        self._step_image = f"views/{path.name}"
+        self._step_extra = {"view": meta}
+        data = base64.standard_b64encode(path.read_bytes()).decode()
+        return [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+            {"type": "text", "text": f"view metadata: {json.dumps(meta, default=str)}"},
+        ]
+
+    _IMAGINE_OPS = ("set", "nudge", "construct", "remove")
+
+    def _t_imagine(self, ops: list, look: bool = True):
+        """Thought experiment on a fork of the world; mainline untouched."""
+        from .core.op import apply_op
+        from .trace import diff_vars
+        from . import views as views_mod
+
+        if not isinstance(ops, list) or not ops:
+            raise ValueError("imagine needs a non-empty list of ops")
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") not in self._IMAGINE_OPS:
+                raise ValueError(
+                    f"imagine allows only world ops {self._IMAGINE_OPS}; got "
+                    f"{op.get('op') if isinstance(op, dict) else op!r} — kernel actions "
+                    "(certify/exhaust/hunt/lean) run only on committed state"
+                )
+        base_vars = {k: np.array(v, dtype=float) for k, v in self.session.vars.items()}
+        base_scene = self.session.scene()
+        fork = self.session.world.fork()
+        outcomes: list[dict] = []
+        for i, op in enumerate(ops):
+            try:
+                apply_op(fork, op)
+            except Exception as e:  # noqa: BLE001 - a failed imagined move is an outcome
+                outcomes.append({"op": i, "error": f"{type(e).__name__}: {e}"})
+                break
+            hyp_vars = fork.free_values()
+            try:
+                res = self.session.comp.check(**hyp_vars)
+                check = {"holds": res.holds, "margin": res.margin, "data": res.data}
+            except Exception as e:  # noqa: BLE001
+                check = {"error": f"{type(e).__name__}: {e}"}
+            outcomes.append({
+                "op": i,
+                "check": check,
+                "diff": diff_vars(base_vars, hyp_vars),
+            })
+        hyp_vars = fork.free_values()
+        try:
+            hyp_scene = self.session.comp.build_scene(**hyp_vars)
+        except Exception:  # noqa: BLE001
+            hyp_scene = []
+        try:
+            hyp_check_res = self.session.comp.check(**hyp_vars)
+            hyp_check = {"holds": hyp_check_res.holds, "margin": hyp_check_res.margin,
+                         "data": hyp_check_res.data}
+        except Exception as e:  # noqa: BLE001
+            hyp_check = {"error": f"{type(e).__name__}: {e}"}
+
+        self.imaginings += 1
+        self._step_mode = "imagine"
+        self._step_branch = {"base_step": self.trace.steps, "ops": ops, "outcomes": outcomes}
+        self._step_state = (hyp_vars, hyp_check, hyp_scene)
+
+        content: list[dict] = []
+        if look and hyp_scene:
+            path = self.out / "imagined" / f"imag_{self.imaginings:03d}.png"
+            views_mod.render_ghost(base_scene, hyp_scene, path,
+                                   title=f"imagined — {self.spec.title}")
+            self._step_image = f"imagined/{path.name}"
+            data = base64.standard_b64encode(path.read_bytes()).decode()
+            content.append({"type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": data}})
+        summary = {
+            "imagined": True,
+            "mainline_unchanged": True,
+            "outcomes": outcomes,
+            "note": "fork discarded — re-issue the ops for real if the picture looks right",
+        }
+        content.append({"type": "text", "text": json.dumps(summary, default=str)[:MAX_TOOL_CHARS]})
+        return content
+
     def _t_refine(self, steps: int = 300):
         r = self.session.refine(steps)
         return json.dumps(r, default=str)
@@ -397,6 +617,61 @@ class AgentRun:
         detail = (attempt.lean_report or {}).get("output", "no Lean code given")
         return f"recorded: method={method}, verified_by={attempt.verified_by}. Lean says: {detail[:800]}"
 
+    def _t_construct(self, name: str, ctor: str, args: list):
+        result = self.session.construct(name, ctor, list(args))
+        self._step_extra = {"construct": result}
+        if result["degenerate"]:
+            return (f"constructed {name} = {ctor}({', '.join(args)}) — DEGENERATE at the "
+                    "current configuration (no value); it will recompute when ancestors move")
+        return (f"constructed {name} = {ctor}({', '.join(args)}) = {result['value']}; "
+                "it now renders in every look and follows its ancestors")
+
+    _RELATIONS = {
+        "<": lambda m, v: m is not None and m < v,
+        "<=": lambda m, v: m is not None and m <= v,
+        ">": lambda m, v: m is not None and m > v,
+        ">=": lambda m, v: m is not None and m >= v,
+    }
+
+    def _t_expect(self, relation: str, value: float | None = None, note: str = ""):
+        if relation in self._RELATIONS and value is None:
+            raise ValueError(f"relation {relation!r} needs a value")
+        if relation not in self._RELATIONS and relation not in ("holds", "fails"):
+            raise ValueError(f"unknown relation {relation!r}")
+        self._expectation_seq += 1
+        exp = {"id": self._expectation_seq, "relation": relation,
+               "value": value, "note": note}
+        self.open_expectations.append(exp)
+        self._step_extra = {"expect": exp}
+        return (f"expectation #{exp['id']} recorded: margin {relation} "
+                f"{value if value is not None else ''} — it will be scored against "
+                "the next committed states")
+
+    def _resolve_expectations(self, check: dict) -> list[dict]:
+        """Mechanical scoring: no judgment, just comparison against the new
+        committed state. Prediction error is the teacher."""
+        if not self.open_expectations or check.get("error"):
+            return []
+        margin, holds = check.get("margin"), check.get("holds")
+        resolved = []
+        for exp in self.open_expectations:
+            rel = exp["relation"]
+            if rel in ("holds", "fails"):
+                if holds is None:
+                    continue
+                ok = bool(holds) if rel == "holds" else not bool(holds)
+                actual = f"holds={holds}"
+            else:
+                if margin is None:
+                    continue
+                ok = self._RELATIONS[rel](float(margin), float(exp["value"]))
+                actual = f"margin={float(margin):.6g}"
+            resolved.append({**exp, "ok": ok, "actual": actual})
+        self.open_expectations = [
+            e for e in self.open_expectations if all(r["id"] != e["id"] for r in resolved)
+        ]
+        return resolved
+
     def _t_finish(self, summary: str):
         self.finished = True
         self.summary = summary
@@ -421,7 +696,6 @@ class AgentRun:
 
     def finalize(self) -> tuple[proof_mod.Proof | None, SearchReport | None, dict]:
         self._transcript.close()
-        self.trace.close()
         from . import library
 
         report = self.best_report()
@@ -446,6 +720,10 @@ class AgentRun:
         artifacts["agent_summary"] = str(self.out / "agent_summary.md")
         artifacts["transcript"] = str(self.out / "transcript.jsonl")
         artifacts["trace"] = str(self.trace.path)
+        # Close the journal LAST: its end marker tells live viewers the run is
+        # complete, so proof.json/answer.md must already be on disk by then
+        # (otherwise a live notebook can read "done" and miss the verdict).
+        self.trace.close()
         return proof, report, artifacts
 
 

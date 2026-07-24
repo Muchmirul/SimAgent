@@ -3,6 +3,11 @@
 Holds one live configuration per loaded problem; every mutation returns the
 full authoritative state (vars + scene graph + check) so the frontend stays a
 dumb renderer.
+
+Since P2 the session is a thin shell over the core atoms: state lives in a
+core.entity.World (free entities from the spec's domain Spaces) and every
+mutation flows through core.op.apply_op — the session adds only the
+spec-compiled check/scene glue and the kept-best report discipline.
 """
 from __future__ import annotations
 
@@ -11,6 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.entity import World
+from ..core.op import apply_op
+from ..core.space import spaces_for
 from ..search import (
     SearchReport,
     certify_candidate,
@@ -47,10 +55,17 @@ class SandboxSession:
         spec.save(self.out / "spec.json")
         self.rng = np.random.default_rng(0)
         self._hunt_seed = 0
-        self.vars: dict[str, np.ndarray] = {}
+        self.world = World()
+        for name, space in spaces_for(spec).items():
+            self.world.add_free(name, space)
         self.last_report: SearchReport | None = None  # most recent search result
         self.best_report: SearchReport | None = None  # strongest kept so far (never downgrades)
         self.sample()
+
+    @property
+    def vars(self) -> dict[str, np.ndarray]:
+        """The free configuration (historical dict shape; state lives in World)."""
+        return self.world.free_values()
 
     def _keep(self, report: SearchReport) -> None:
         self.last_report = report
@@ -68,9 +83,42 @@ class SandboxSession:
 
     def scene(self) -> list[dict]:
         try:
-            return self.comp.build_scene(**self.vars)
+            base = self.comp.build_scene(**self.vars)
         except Exception:  # noqa: BLE001
             return []
+        return base + self._constructed_prims()
+
+    def _constructed_prims(self) -> list[dict]:
+        """Render agent-constructed derived entities (the sketching hand):
+        every construct op becomes visible geometry, projected to <=3 coords."""
+        from ..sandbox import scene as scene_mod
+
+        prims: list[dict] = []
+        for name in self.world.derived_names():
+            val = self.world.values.get(name)
+            if val is None:
+                continue  # degenerate construction: nothing to draw
+            arr = np.asarray(val, dtype=float)
+            if arr.ndim == 0:
+                continue  # scalars (volumes etc.) surface via measures, not geometry
+            if arr.ndim == 1 and arr.size >= 2:
+                prims.append(scene_mod.points([arr[:3].tolist()], color="#f2c14e",
+                                              radius=0.06, name=name))
+            elif arr.ndim == 2 and arr.shape[0] == 2:
+                prims.append(scene_mod.segments(
+                    [(arr[0][:3].tolist(), arr[1][:3].tolist())], color="#f2c14e", width=2.0))
+        return prims
+
+    def construct(self, name: str, ctor: str, args: list[str]) -> dict:
+        """Add a derived entity (the agent's pencil). Returns its value/status."""
+        apply_op(self.world, {"op": "construct", "name": name, "ctor": ctor,
+                              "args": list(args)})
+        val = self.world.values.get(name)
+        return {
+            "name": name, "ctor": ctor, "args": list(args),
+            "value": None if val is None else np.asarray(val).tolist(),
+            "degenerate": val is None,
+        }
 
     def state(self) -> dict:
         scene = self.scene()
@@ -102,31 +150,18 @@ class SandboxSession:
             vars = sample_vars(self.rng, self.spec)
             try:
                 if self.comp.valid(**vars):
-                    self.vars = vars
+                    apply_op(self.world, {"op": "replace", "vars": vars})
                     return
             except Exception:  # noqa: BLE001
                 continue
         raise RuntimeError("could not draw a valid sample (constraint too strict?)")
 
     def set_value(self, name: str, row: int | None, values: list[float]) -> None:
-        if name not in self.vars:
-            raise KeyError(f"unknown variable {name!r}")
-        v = self.vars[name]
-        arr = np.array(values, dtype=float)
-        if row is None:
-            if arr.size != v.size:
-                raise ValueError(f"{name} needs {v.size} numbers, got {arr.size}")
-            self.vars[name] = arr.reshape(v.shape)
-        else:
-            if not (0 <= row < v.shape[0]):
-                raise ValueError(f"{name} has rows 0..{v.shape[0] - 1}")
-            if arr.size != np.asarray(v[row]).size:
-                raise ValueError(f"{name}[{row}] needs {np.asarray(v[row]).size} numbers")
-            v[row] = arr
+        apply_op(self.world, {"op": "set", "target": name, "row": row, "values": values})
 
     def refine(self, steps: int = 300) -> dict:
         vars, res, used = refine_candidate(self.spec, self.vars, steps=steps)
-        self.vars = vars
+        apply_op(self.world, {"op": "replace", "vars": vars})
         return {"steps": used, "holds": res.holds, "margin": res.margin}
 
     def exhaust(self) -> dict:
@@ -138,7 +173,8 @@ class SandboxSession:
         report = run_exhaustive(self.spec)
         self._keep(report)
         if report.witness:
-            self.vars = {k: np.array(v, dtype=float) for k, v in report.witness.items()}
+            apply_op(self.world, {"op": "replace", "vars": {
+                k: np.array(v, dtype=float) for k, v in report.witness.items()}})
         return {
             "verdict": report.verdict,
             "certified": report.certified,
@@ -152,7 +188,8 @@ class SandboxSession:
         report = run_search(self.spec, trials=trials, seed=self._hunt_seed)
         self._keep(report)
         if report.witness:
-            self.vars = {k: np.array(v, dtype=float) for k, v in report.witness.items()}
+            apply_op(self.world, {"op": "replace", "vars": {
+                k: np.array(v, dtype=float) for k, v in report.witness.items()}})
         return {
             "verdict": report.verdict,
             "certified": report.certified,

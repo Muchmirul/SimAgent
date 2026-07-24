@@ -22,7 +22,7 @@ kernel is the sole authority on deduction. Three pillars: **Python** computes,
 
 ```mermaid
 flowchart LR
-    A["conjecture<br/>natural language"] -->|"LLM formalizer (sandbox-vetted)"| B["ProblemSpec<br/>JSON + code"]
+    A["conjecture<br/>natural language"] -->|"LLM formalizer (sandbox-vetted)"| B["native Claim<br/>spaces + recipe + registries"]
     B --> C["Sandbox<br/>Python computation"]
     C --> D["Search<br/>exhaustive or sampled+annealed"]
     D --> E["Proof kernel<br/>method + verified_by"]
@@ -53,21 +53,29 @@ uv venv .venv && uv pip install -p .venv/bin/python -e ".[dev]"
 .venv/bin/simagent solve circumcenter-in-tetrahedron --trials 2000
 ```
 
-Four conjectures are bundled and run fully offline — each is a known-answer
-test for the whole machine:
+Five conjectures are bundled and run fully offline — each is a known-answer
+test for the whole machine, and all are **native claims** (a closed vocabulary
+of spaces, construction recipes and registry measures — no generated code is
+ever exec'd):
 
 | id | truth | method the harness reaches |
 |---|---|---|
 | `circumcenter-in-triangle` | false | **counterexample**, `sandbox+lean` |
 | `circumcenter-in-tetrahedron` | false | **counterexample**, `sandbox+lean` |
+| `circumcenter-in-4simplex` (ℝ⁴!) | false | **counterexample**, `sandbox` — no Lean above d=3, stated explicitly |
 | `sum-of-odds-square` | true (bounded) | **exhaustion** — all 201 cases + Lean `decide` |
 | `euler-characteristic-hull` | true | no proof — *evidence only*, and it says so |
+
+The ℝ⁴ entry is the point: the core is dimension-agnostic. Dimension enters
+only at the boundaries (the Space a claim lives in, the View that renders
+it); everything between — search, exact certification, the proof kernel — is
+dimension-blind.
 
 A run directory contains the whole story:
 
 ```
 runs/<id>-seed0/
-  spec.json        the conjecture as executable ProblemSpec
+  spec.json        the conjecture as a native claim (claim/1 JSON)
   report.json      search report (verdict, witness, margins, certification)
   scene.json       3D scene graph of the decisive configuration
   preview.png      matplotlib 3D render (always)

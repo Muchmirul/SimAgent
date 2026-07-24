@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
+from .core.space import SAFE_INT_BOUND, spaces_for
 from .sandbox import certify as certify_mod
 from .spec import CheckResult, CompiledSpec, ProblemSpec, sample_vars
 
@@ -58,7 +59,7 @@ def _refine(
     goal: float = 0.08,
 ) -> tuple[dict[str, np.ndarray], CheckResult, int]:
     """Hill-climb the margin (down for counterexamples, up for witnesses)."""
-    bounds = {v.name: (v.low, v.high) for v in spec.domain}
+    spaces = spaces_for(spec)  # the annealing move is Space.perturb (input boundary)
     cur = {k: np.array(v, dtype=float) for k, v in start.items()}
     cur_res = _safe_check(comp, cur)
     assert cur_res is not None and cur_res.margin is not None
@@ -66,10 +67,7 @@ def _refine(
     used = 0
     for i in range(steps):
         used = i + 1
-        cand = {
-            k: np.clip(v + rng.normal(0.0, sigma, size=v.shape), *bounds[k])
-            for k, v in cur.items()
-        }
+        cand = {k: spaces[k].perturb(rng, v, sigma) for k, v in cur.items()}
         res = _safe_check(comp, cand)
         if res is not None and res.margin is not None:
             better = res.margin < cur_res.margin if minimize else res.margin > cur_res.margin
@@ -113,19 +111,9 @@ def _try_certify(
     return False, None, None, notes
 
 
+# SAFE_INT_BOUND is single-sourced in core.space (the input boundary owns
+# integer-exactness); re-exported above for existing importers.
 EXHAUSTION_CAP = 2_000_000
-# Inputs must stay well within float64's exact-integer range (2^53) so that a
-# float64 `check()` on integer cases is genuinely exact arithmetic. This bounds
-# the *inputs*; a spec whose check grows values past 2^53 must supply
-# certify_code (which run_exhaustive then uses for the exact verdict).
-SAFE_INT_BOUND = 2**40
-
-
-def _entries(shape) -> int:
-    n = 1
-    for d in shape:
-        n *= int(d)  # python int: no np.prod int64 overflow
-    return n
 
 
 def case_count(spec: ProblemSpec) -> int | None:
@@ -134,24 +122,19 @@ def case_count(spec: ProblemSpec) -> int | None:
     Returns 0 for an empty or inverted (low > high) integer range.
     """
     total = 1
-    for v in spec.domain:
-        if v.kind != "int":
+    for space in spaces_for(spec).values():
+        n = space.count()
+        if n is None:
             return None
-        per_entry = int(v.high) - int(v.low) + 1
-        if per_entry <= 0:
+        if n == 0:
             return 0
-        total *= per_entry ** _entries(v.shape)
+        total *= n
     return total
 
 
 def int_domain_exact(spec: ProblemSpec) -> bool:
     """True iff every integer input stays within the exact-float range."""
-    for v in spec.domain:
-        if v.kind != "int":
-            return False
-        if abs(int(v.low)) > SAFE_INT_BOUND or abs(int(v.high)) > SAFE_INT_BOUND:
-            return False
-    return True
+    return all(space.int_exact for space in spaces_for(spec).values())
 
 
 def exhaustible(spec: ProblemSpec, cap: int = EXHAUSTION_CAP) -> bool:
@@ -187,12 +170,10 @@ def run_exhaustive(spec: ProblemSpec, cap: int = EXHAUSTION_CAP) -> SearchReport
         "verdict is NOT certified unless certify_code re-decides it)"
     )
 
+    spaces = spaces_for(spec)
+
     def var_cases(v):
-        vals = range(int(v.low), int(v.high) + 1)
-        return [
-            np.array(combo, dtype=float).reshape(tuple(v.shape))
-            for combo in itertools.product(vals, repeat=_entries(v.shape))
-        ]
+        return spaces[v.name].enumerate_cases()
 
     names = [v.name for v in spec.domain]
     checked = 0
@@ -283,12 +264,15 @@ def run_exhaustive(spec: ProblemSpec, cap: int = EXHAUSTION_CAP) -> SearchReport
 
 
 def _int_repr(arr: np.ndarray) -> object:
+    """Exact-string form of an integer case, any ndim (d-generic)."""
     a = np.asarray(arr)
     if a.ndim == 0:
         return str(int(a))
     if a.ndim == 1:
         return [[str(int(x)) for x in a]]
-    return [[str(int(x)) for x in row] for row in a]
+    if a.ndim == 2:
+        return [[str(int(x)) for x in row] for row in a]
+    return [_int_repr(sub) for sub in a]
 
 
 def refine_candidate(

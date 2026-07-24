@@ -13,10 +13,34 @@ Your browser opens the **reasoning notebook** at **http://127.0.0.1:8642**.
 ## 2. The idea
 
 A coding agent shows its work as diffs. SimAgent shows a *math* agent's work
-as a **visual chain of thought**: the agent lives in a 3D sandbox (its
-"mind"), and the notebook streams that mind step by step. Equations appear in
-every cell, but as *translations* of what the agent is looking at — the
-thinking happens in the scene; the symbols are the record.
+as a **visual chain of thought**: the agent lives in a sandbox (its "mind"),
+and the notebook streams that mind step by step. Equations appear in every
+cell, but as *translations* of what the agent is looking at — the thinking
+happens in the scene; the symbols are the record.
+
+The sandbox is not limited to 3D: claims live in any dimension (there is a
+bundled ℝ⁴ problem). For d ≤ 3 the pictures are faithful; above that they are
+honest projections and the numbers lead. Above d = 3 no Lean certificate is
+generated yet — the verdict tops out at exact rational arithmetic, and the
+answer says so explicitly.
+
+The agent's senses and hands, beyond looking and moving points:
+
+- **measure** — the qualitative description ("outside, beyond the face
+  opposite vertex 2, margin −0.41")
+- **view field** — the claim's margin painted over a slice of configuration
+  space: blue where it HOLDS, red where it FAILS, the amber **zero-contour is
+  the shape of the theorem's boundary** (for the triangle claim it is
+  literally the Thales circle)
+- **view sweep / trajectory** — margin along one coordinate / over the session
+- **imagine** — an Einstein thought experiment: ops run on a *fork* of the
+  world, shown as a dashed **Im[n]** cell with a ghost image; the real
+  configuration is untouched
+- **construct** — the sketching hand: add a midpoint / centroid / circumcenter
+  to the scene; it renders from then on and follows its ancestors
+- **expect** — a falsifiable prediction (◌ chip) that the harness scores
+  mechanically against later states (✓/✗ chips) — prediction error is how the
+  agent learns the scene
 
 ## 3. Run an agent on a bundled problem
 

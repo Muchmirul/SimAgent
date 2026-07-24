@@ -17,16 +17,20 @@ import numpy as np
 import sympy as sp
 
 
-def rationalize_array(arr, max_den: int = 64) -> sp.Matrix | sp.Rational:
-    """Snap a float scalar/array to nearby rationals.
+def rationalize_array(arr, max_den: int = 64) -> sp.Matrix | sp.Rational | list:
+    """Snap a float scalar/array to nearby rationals — any ndim (d-generic).
 
-    Arrays (2D or 1D) become sympy Matrices of Rationals; scalars become
-    Rational. Small denominators keep certificates human-readable.
+    ndim 0 -> Rational; ndim 1/2 -> sympy Matrix of Rationals (1-D becomes a
+    (1, n) row matrix, the historical convention the exact geometry helpers
+    rely on); ndim >= 3 -> nested Python lists of the ndim-2 base case. Small
+    denominators keep certificates human-readable.
     """
     a = np.asarray(arr, dtype=float)
     if a.ndim == 0:
         f = Fraction(float(a)).limit_denominator(max_den)
         return sp.Rational(f.numerator, f.denominator)
+    if a.ndim >= 3:
+        return [rationalize_array(sub, max_den=max_den) for sub in a]
     if a.ndim == 1:
         a = a.reshape(1, -1)
     rows = []
@@ -47,6 +51,8 @@ def to_float(exact) -> np.ndarray | float:
     """Back-convert an exact value to floats (to re-run the numeric check)."""
     if isinstance(exact, sp.MatrixBase):
         return np.array(exact.tolist(), dtype=float)
+    if isinstance(exact, list):
+        return np.array([np.asarray(to_float(e), dtype=float) for e in exact])
     return float(exact)
 
 
@@ -54,6 +60,8 @@ def exact_repr(exact) -> object:
     """JSON-able representation ('p/q' strings) of an exact witness value."""
     if isinstance(exact, sp.MatrixBase):
         return [[str(exact[i, j]) for j in range(exact.cols)] for i in range(exact.rows)]
+    if isinstance(exact, list):
+        return [exact_repr(e) for e in exact]
     return str(exact)
 
 

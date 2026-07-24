@@ -97,6 +97,7 @@ function actLine(step) {
   a.appendChild(el('span', null, step.tool ? `${step.tool}(${argsText})` : '— narrative only —'));
   if (step.error) a.appendChild(el('span', 'err', '  ✗ error'));
   for (const [k, v] of Object.entries(step.extra ?? {})) {
+    if (['view', 'expect', 'resolved_expectations', 'construct'].includes(k)) continue; // rendered as chips/badges in Out
     a.appendChild(el('span', 'badge', `  ${k}=${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`));
   }
   return a;
@@ -129,7 +130,74 @@ function statBadge(check) {
   return b;
 }
 
+function imagineCell(step) {
+  // Thought experiment: dashed cell, ghost image, per-op outcomes — and an
+  // explicit "mainline unchanged" note. The Einstein move, visible.
+  const cell = el('article', 'cell imagine');
+  cell.appendChild(el('div', 'gut im', `Im [${step.step}]:`));
+  const body = el('div');
+  const th = thoughtBlock(step);
+  if (th) body.appendChild(th);
+  const inner = el('div');
+  inner.appendChild(el('div', 'imnote', 'thought experiment — the real configuration is unchanged'));
+  const ops = step.branch?.ops ?? step.args?.ops ?? [];
+  const act = el('div', 'act mono');
+  act.textContent = `imagine(${ops.map((o) => `${o.op} ${o.target ?? o.name ?? ''}`).join(' · ')})`;
+  inner.appendChild(act);
+  if (step.image) {
+    const img = el('img', 'sceneimg');
+    img.loading = 'lazy';
+    img.alt = `imagined scene at step ${step.step}`;
+    img.src = `/api/trace/${encodeURIComponent(nb.run)}/file/${step.image}`;
+    img.onerror = () => img.remove();
+    if (Array.isArray(step.scene) && step.scene.length) img.onclick = () => open3d(step);
+    inner.appendChild(img);
+    inner.appendChild(el('div', 'caption', 'ghost view: grey = real state · solid = imagined'));
+  }
+  for (const oc of step.branch?.outcomes ?? []) {
+    const line = el('div', 'imoutcome mono');
+    if (oc.error) {
+      line.appendChild(el('span', 'bad', `op ${oc.op}: ${oc.error}`));
+    } else if (oc.check?.error) {
+      line.appendChild(el('span', 'bad', `op ${oc.op}: degenerate — ${oc.check.error}`));
+    } else {
+      const m = oc.check?.margin;
+      const holds = oc.check?.holds;
+      const span = el('span', holds ? 'good' : 'bad',
+        `op ${oc.op}: would ${holds ? 'HOLD' : 'FAIL'}${m === null || m === undefined ? '' : ` (margin ${Number(m).toFixed(4)})`}`);
+      line.appendChild(span);
+    }
+    inner.appendChild(line);
+  }
+  const eqLines = step.equation?.text ?? [];
+  if (eqLines.length) inner.appendChild(el('div', 'eq mono', eqLines.join('\n')));
+  body.appendChild(inner);
+  cell.appendChild(body);
+  $('cells').appendChild(cell);
+  return cell;
+}
+
+function annotationCell(step) {
+  // plan/expect ride tool steps; free annotations (user_comment, provenance)
+  // land here — rendered like an approach box, tagged with their kind.
+  const cell = el('article', 'cell');
+  cell.appendChild(el('div', 'gut', `— [${step.step}]`));
+  const body = el('div');
+  const th = thoughtBlock(step);
+  if (th) body.appendChild(th);
+  const box = el('div', 'planbox');
+  box.appendChild(el('div', 'pm', step.kind === 'user_comment' ? 'comment (steering — never verdict material)' : (step.kind ?? 'annotation')));
+  if (step.text) box.appendChild(el('div', 'pi', step.text));
+  if (step.target) box.appendChild(el('div', 'pi', `on: ${JSON.stringify(step.target)}`));
+  body.appendChild(box);
+  cell.appendChild(body);
+  $('cells').appendChild(cell);
+  return cell;
+}
+
 function appendStep(step) {
+  if (step.mode === 'imagine') return imagineCell(step);
+  if (step.mode === 'annotation') return annotationCell(step);
   const cell = el('article', 'cell');
   const gut = el('div', 'gut in', `In [${step.step}]:`);
   cell.appendChild(gut);
@@ -159,6 +227,39 @@ function appendStep(step) {
   body.appendChild(actLine(step));
 
   const out = el('div', 'outblock');
+  // FUTURE band: declared predictions (pending) and their mechanical scoring
+  const exp = step.extra?.expect;
+  if (exp) {
+    out.appendChild(el('span', 'chip pending',
+      `◌ expects margin ${exp.relation} ${exp.value ?? ''}${exp.note ? ` — ${exp.note}` : ''}`));
+  }
+  const resolved = step.extra?.resolved_expectations;
+  if (resolved?.length) {
+    const box = el('div');
+    for (const r of resolved) {
+      box.appendChild(el('span', `chip ${r.ok ? 'ok' : 'bad'}`,
+        `${r.ok ? '✓' : '✗'} #${r.id} margin ${r.relation} ${r.value ?? ''} → ${r.actual}`));
+    }
+    out.appendChild(box);
+  }
+  const built = step.extra?.construct;
+  if (built) {
+    out.appendChild(el('span', 'chip pending',
+      `✎ ${built.name} = ${built.ctor}(${(built.args ?? []).join(', ')})${built.degenerate ? ' — degenerate here' : ''}`));
+  }
+  const vmeta = step.extra?.view;
+  if (vmeta) {
+    const b = el('div');
+    b.appendChild(el('span', 'viewbadge', `view: ${vmeta.kind}`));
+    const bits = [];
+    if (vmeta.zero_contour) bits.push('zero-contour visible — the boundary has a shape');
+    if (vmeta.fail_fraction !== undefined) bits.push(`FAILS on ${(vmeta.fail_fraction * 100).toFixed(0)}% of the slice`);
+    if (vmeta.min_margin !== undefined) bits.push(`min margin ${Number(vmeta.min_margin).toFixed(4)}`);
+    if (vmeta.zero_crossings?.length) bits.push(`${vmeta.zero_crossings.length} zero crossing(s)`);
+    if (vmeta.final_margin !== undefined) bits.push(`final margin ${Number(vmeta.final_margin).toFixed(4)}`);
+    if (bits.length) b.appendChild(el('span', 'caption', '  ' + bits.join(' · ')));
+    out.appendChild(b);
+  }
   const hasScene = Array.isArray(step.scene) && step.scene.length;
   if (step.tool) {
     const img = el('img', 'sceneimg');

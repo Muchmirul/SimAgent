@@ -77,6 +77,14 @@ def lean_simplex_circumcenter(T: sp.Matrix, theorem: str, title: str) -> str:
     """
     m, d = T.shape
     assert m == d + 1, "expected an (n+1) x n simplex"
+    if d > 3:
+        # The edge-determinant encoding uses cofactor expansion; beyond 3x3 the
+        # term count explodes and `decide` chokes. Honest cap, stated plainly
+        # (the LU-witness encoding is the documented post-v2 extension).
+        raise ValueError(
+            f"Lean certificate capped at d<=3 (got d={d}); "
+            "sandbox verdict (exact rational arithmetic) stands"
+        )
     c = exact_circumcenter(T)
     w = exact_barycentric(T, c)
     k = min(range(m), key=lambda i: w[i])

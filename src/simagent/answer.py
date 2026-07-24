@@ -107,6 +107,23 @@ def _proof_lines(proof) -> list[str]:
     return lines
 
 
+def _dim_cap_notice(spec, proof) -> list[str]:
+    """The D6 honesty line: above d = 3 no Lean certificate is generated —
+    say so explicitly wherever a verdict is presented."""
+    dims = [list(v.shape)[-1] if list(v.shape) else 0 for v in getattr(spec, "domain", [])]
+    if max(dims, default=0) <= 3:
+        return []
+    if proof is not None and "lean" in (proof.verified_by or ""):
+        return []
+    return [
+        "> **Dimension note:** this claim lives above ℝ³. No Lean certificate is "
+        "generated above d = 3 (the certificate encoding caps there), so the "
+        "strongest available verdict is exact rational arithmetic "
+        "(`verified_by: sandbox`). This is stated rather than hidden.",
+        "",
+    ]
+
+
 def write_markdown(spec: ProblemSpec, report: SearchReport, path: Path, proof=None) -> None:
     check = report.witness_check or {}
     lines = [
@@ -118,6 +135,7 @@ def write_markdown(spec: ProblemSpec, report: SearchReport, path: Path, proof=No
         "",
         f"## Verdict: {verdict_text(report)}",
         "",
+        *_dim_cap_notice(spec, proof),
         *_proof_lines(proof),
         _md_witness(report),
     ]

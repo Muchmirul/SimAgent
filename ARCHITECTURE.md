@@ -1,7 +1,36 @@
 # SimAgent architecture
 
-SimAgent is an **agent harness for 3D math**: a small kernel with a strict
-responsibility split, where correctness beats features.
+SimAgent is an **agent harness for visualization-based math**: a small kernel
+with a strict responsibility split, where correctness beats features. Humans
+and agents solve math by communicating through visuals — imagine, visualize,
+act, and only then formalize (equations are the *translation* of thought,
+never the medium). See plan.md for the full v2 design and decision log.
+
+## The eight atoms
+
+Everything in the domain — harnessing an LLM to do math through visualization
+— composes from eight primitives (`src/simagent/core/`). Dimension-aware code
+exists ONLY at the two boundaries: Space (input) and View (output); everything
+between is dimension-blind.
+
+| primitive | physical analogy | role |
+|---|---|---|
+| **Space** | configuration space | input boundary: `sample / valid / perturb / exact / enumerate`. v1: `Box(ℝᵈ)`, `IntBox(ℤᵈ)` |
+| **Entity** | particle | named, stable id; *free* (value in a Space) or *derived* (recipe over entities — coordinates are consequences, the CAD lesson) |
+| **Op** | force | THE only mutation channel (Blender lesson) = the agent's action vocabulary; a closed registry replaces exec'd code |
+| **Derive** | physical law | dependency graph; derived entities recompute when ancestors move |
+| **Measure** | observable | perception as calibrated compression: margins + qualitative predicates; never raw coordinate dumps |
+| **Claim** | hypothesis under test | quantifier + free Spaces + recipe + a distinguished measure, all from closed registries |
+| **Journal** | worldline / lab notebook | dynamics first-class: state = replay(journal) = save format = undo = notebook feed; `imagine` branches = thought experiments; annotations = plan/expect/user_comment |
+| **View** | detector | output boundary: identity (d≤3), **field** (margin painted over a config-space slice, fixed diverging colormap centered at 0, zero-contour = the theorem's shape — the Ansys lesson), sweep, ghost, trajectory |
+
+Derivations (features as compositions): sample = Op(Space.sample) · refine =
+loop{perturb → Measure → keep} · hunt = sampleⁿ + refine · exhaust =
+Space.enumerate × Measure · certify = Space.exact + exact Measure · construct
+= Op(add derived) + Derive · diff = Journal[n] − Journal[n−1] · imagine = Ops
+on a World fork, journaled `mode:"imagine"`, never merged · expect = journal
+annotation scored mechanically on later commits · undo/branch = journal
+prefix replay + fork.
 
 ## The responsibility split
 
@@ -157,23 +186,41 @@ Two interchangeable backends drive the same `AgentRun` state machine:
 
 ```
 src/simagent/
-  spec.py        ProblemSpec contract; THE domain sampler; code exec with toolbox
-  search.py      sampled search + annealing + exact certify; exhaustive enumeration
+  core/          THE EIGHT ATOMS (pure: stdlib+numpy+sympy+sandbox leaves only,
+                 enforced by tests/test_layering.py):
+                   space.py entity.py op.py derive.py measure.py claim.py
+                   journal.py report.py
+  views/         the output boundary: identity, field, sweep, ghost, trajectory
+                 (one calibrated visual language: diverging colormap centered
+                 at margin 0 — blue HOLDS / red FAILS, zero-contour marked)
+  search.py      sampled search + annealing (Space.perturb) + exact certify;
+                 exhaustive enumeration (Space.enumerate) — fail-closed
   proof.py       the proof kernel (methods, Proof, verified_by) — sole verdict authority
   lean_check.py  run Lean core on generated sources; fail-closed acceptance
-  sandbox/       geometry.py (numeric), certify.py (sympy exact), scene.py
-                 (renderer-agnostic scene graph), leangen.py (Lean certificates)
-  answer.py      Markdown / LaTeX / Lean skeleton emitters (method-aware)
-  pipeline.py    one run = spec → search → proof → viz → answers → report.json
-  llm.py         formalize (spec synthesis, sandbox-vetted) and attempt_proof
-                 (deductive attempts; Lean-checked, never trusted)
-  library/       bundled specs; known-answer tests for the whole machine
+  sandbox/       geometry.py (numeric, d-generic simplex math + hull_facets),
+                 certify.py (sympy exact, any-ndim rationalization),
+                 scene.py (scene graph), leangen.py (Lean certs; d<=3 cap
+                 stated explicitly — the LU-witness encoding is the extension)
+  answer.py      Markdown / LaTeX / Lean skeleton emitters; states the d>3
+                 no-Lean cap explicitly in every verdict it touches
+  pipeline.py    one run = claim → search → proof → viz → answers → report.json
+  llm.py         formalize (native Claim synthesis from the closed vocabulary,
+                 sandbox-vetted) and attempt_proof (Lean-checked, never trusted)
+  library/       bundled native Claims — zero exec'd code; known-answer tests
+                 incl. circumcenter-in-4simplex (the dimension-agnostic gate)
   visualize/     mpl.py (always-on PNG), manim_gen.py (generated ThreeDScene)
-  agent.py       embodied LLM loop (vision + tools) over one SandboxSession
-  trace.py       the mind trace: thought+act+scene+equation+diff per agent step
+  agent.py       embodied LLM loop (vision + tools) over one SandboxSession;
+                 tools: plan look sample set_var nudge check measure view
+                 imagine construct expect refine hunt exhaust certify
+                 submit_lean_proof finish
+  kernel_transport.py  JSONL subprocess bridge for the pi runtime (P0):
+                 hash-verified journal-prefix replay; toolCallId correlation
+  spec.py        LEGACY exec'd-code contract (deprecated; loader only)
+  trace.py       shim → core.journal
   play.py, web/  shells: terminal REPL and the reasoning-notebook UI over the
                  same kernel (trace replay/live-follow via /api/runs,
                  /api/trace; agent sessions via /api/agent/start)
+agent/           TypeScript pi runtime spike (exact-pinned @earendil-works/*)
 ```
 
 ## Rules for contributors (human or LLM)

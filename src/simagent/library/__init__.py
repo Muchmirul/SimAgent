@@ -1,33 +1,48 @@
-"""Bundled ProblemSpecs — runnable offline, and few-shot examples for the LLM.
+"""Bundled native Claims — runnable offline, known-answer tests for the whole
+machine, and few-shot examples for the LLM formalizer.
 
-Two deliberately false classics (the machine disproves them with certified
-rational counterexamples) and one true invariant (the evidence path).
+Three deliberately false classics (the machine disproves them with certified
+rational counterexamples — in ℝ², ℝ³, and ℝ⁴), one true invariant (the
+evidence path), and one exhaustion-provable arithmetic identity. Zero exec'd
+code strings anywhere: every claim is recipe + registry keys (decision D3).
 """
 from __future__ import annotations
 
-from ..spec import ProblemSpec
-from . import circumcenter_tetrahedron, circumcenter_triangle, euler_polyhedron, sum_of_odds
+from ..core.claim import Claim
+from . import (
+    circumcenter_4simplex,
+    circumcenter_tetrahedron,
+    circumcenter_triangle,
+    euler_polyhedron,
+    sum_of_odds,
+)
 
-_MODULES = [circumcenter_triangle, circumcenter_tetrahedron, euler_polyhedron, sum_of_odds]
+_MODULES = [
+    circumcenter_triangle,
+    circumcenter_tetrahedron,
+    circumcenter_4simplex,
+    euler_polyhedron,
+    sum_of_odds,
+]
 
-REGISTRY: dict[str, ProblemSpec] = {m.SPEC.id: m.SPEC for m in _MODULES}
+REGISTRY: dict[str, Claim] = {m.CLAIM.id: m.CLAIM for m in _MODULES}
 
 
-def get(problem_id: str) -> ProblemSpec:
+def get(problem_id: str) -> Claim:
     if problem_id not in REGISTRY:
         known = ", ".join(sorted(REGISTRY))
         raise KeyError(f"unknown problem {problem_id!r}; bundled problems: {known}")
     return REGISTRY[problem_id]
 
 
-def all_specs() -> list[ProblemSpec]:
+def all_specs() -> list[Claim]:
     return list(REGISTRY.values())
 
 
-def is_bundled(spec: ProblemSpec) -> bool:
-    """True only for the in-process bundled spec objects (reviewed, trusted).
+def is_bundled(spec) -> bool:
+    """True only for the in-process bundled claim objects (reviewed, trusted).
 
-    Identity, not id-string: a disk-loaded spec carrying a bundled id is a
+    Identity, not id-string: a disk-loaded claim carrying a bundled id is a
     different object and is correctly treated as untrusted.
     """
     return REGISTRY.get(spec.id) is spec

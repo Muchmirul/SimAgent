@@ -1,0 +1,26 @@
+{
+  "name": "@simagent/pi-runtime-spike",
+  "version": "0.0.0-p0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@10.9.8",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "auth:check": "node dist/cli.js auth-check",
+    "smoke": "node dist/cli.js smoke"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

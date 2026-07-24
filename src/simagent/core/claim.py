@@ -1,0 +1,474 @@
+"""Claim — atom #6 (hypothesis under test), with the native engine (P5).
+
+A Claim = quantifier + free Spaces + a recipe of constructions + a
+distinguished measure, all drawn from CLOSED REGISTRIES — no exec'd code
+anywhere on the native path (decision D3: typed vocabulary replaces
+LLM-emitted code strings; AlphaGeometry-proven). A native Claim is
+"spec-like": it duck-types every surface the search/proof/answer machinery
+consumes (`domain`, `quantifier`, `compiled()`, `save()`, …), so the truth
+layer runs on Claims unchanged.
+
+Engines:
+- **native**: recipe + registry keys (bundled library, LLM formalizer output)
+- **legacy**: wraps a historical ProblemSpec via `claim_from_spec`
+  (kept one release for old disk specs; the exec path is deprecated)
+
+Only the truth layer decides claims; a Claim carries no verdict state.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from ..sandbox import geometry, leangen, scene
+from ..sandbox import certify as certify_mod
+from .derive import CONSTRUCTORS
+from .space import Box, IntBox, Space, spaces_for
+
+CLAIM_FORMAT = "claim/1"
+
+
+@dataclass(frozen=True)
+class FreeVar:
+    """Duck-typed VarSpec: what samplers/search need to know about a free
+    entity (core cannot import spec.py — layering)."""
+
+    name: str
+    shape: list[int]
+    low: float
+    high: float
+    kind: str  # "real" | "int"
+
+
+@dataclass
+class NativeCheckResult:
+    holds: bool
+    margin: float | None
+    data: dict
+
+
+# -- registries: the closed vocabulary ----------------------------------------
+
+def _recipe_env(recipe: list[dict], vars: dict) -> dict:
+    env = {k: np.asarray(v, dtype=float) for k, v in vars.items()}
+    for step in recipe:
+        fn = CONSTRUCTORS[step["ctor"]]["fn"]
+        env[step["name"]] = np.asarray(
+            fn(*[env[a] for a in step["args"]]), dtype=float
+        )
+    return env
+
+
+def _measure_min_coord(env: dict, recipe: list[dict], params: dict) -> NativeCheckResult:
+    w = np.asarray(env[params["of"]], dtype=float).ravel()
+    margin = float(w.min())
+    data = {s["name"]: env[s["name"]].tolist() for s in recipe}
+    return NativeCheckResult(holds=margin > 0, margin=margin, data=data)
+
+
+def _measure_sum_odds_square(env: dict, recipe: list[dict], params: dict) -> NativeCheckResult:
+    k = int(env[params["of"]])
+    total = sum(2 * i + 1 for i in range(k))
+    return NativeCheckResult(
+        holds=total == k * k,
+        margin=None,
+        data={"n": k, "sum_of_first_n_odds": total, "n_squared": k * k},
+    )
+
+
+def _measure_euler_characteristic(env: dict, recipe: list[dict], params: dict) -> NativeCheckResult:
+    V, E, F = geometry.hull_counts(env[params["of"]])
+    chi = V - E + F
+    return NativeCheckResult(holds=chi == 2, margin=None,
+                             data={"V": V, "E": E, "F": F, "chi": chi})
+
+
+MEASURES = {
+    "min_coord": {"fn": _measure_min_coord, "params": ("of",),
+                  "doc": "margin = smallest coordinate of a derived vector "
+                         "(e.g. barycentric weights: positive iff inside)"},
+    "sum_of_first_odds_equals_square": {"fn": _measure_sum_odds_square, "params": ("of",),
+                                        "doc": "discrete: sum of first n odds == n^2"},
+    "euler_characteristic": {"fn": _measure_euler_characteristic, "params": ("of",),
+                             "doc": "discrete: V - E + F == 2 on the 3D convex hull"},
+}
+
+
+def _constraint_min_volume(vars: dict, params: dict) -> bool:
+    return geometry.simplex_volume(np.asarray(vars[params["of"]], dtype=float)) > float(
+        params.get("threshold", 0.05)
+    )
+
+
+def _constraint_hull_valid(vars: dict, params: dict) -> bool:
+    try:
+        geometry.hull_counts(np.asarray(vars[params["of"]], dtype=float))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+CONSTRAINTS = {
+    "min_volume": {"fn": _constraint_min_volume, "params": ("of", "threshold"),
+                   "doc": "simplex volume above a nondegeneracy threshold"},
+    "hull_valid": {"fn": _constraint_hull_valid, "params": ("of",),
+                   "doc": "the point cloud has a valid convex hull"},
+}
+
+
+def _certify_simplex_inside(exact: dict, params: dict) -> bool:
+    T = exact[params["of"]]
+    c = certify_mod.exact_circumcenter(T)
+    w = certify_mod.exact_barycentric(T, c)
+    return all(x > 0 for x in w)
+
+
+CERTIFIERS = {
+    "simplex_circumcenter_inside": {
+        "fn": _certify_simplex_inside, "params": ("of",),
+        "doc": "exact-rational: circumcenter strictly inside the simplex",
+    },
+}
+
+
+def _lean_simplex(exact: dict, params: dict) -> str:
+    return leangen.lean_simplex_circumcenter(
+        exact[params["of"]], theorem=params["theorem"], title=params["title"]
+    )
+
+
+def _lean_bounded_nat(exact: dict, params: dict) -> str:
+    return leangen.lean_bounded_nat(
+        theorem=params["theorem"], title=params["title"],
+        defs=params["defs"], statement=params["statement"],
+    )
+
+
+LEANS = {
+    "simplex_circumcenter": {"fn": _lean_simplex,
+                             "params": ("of", "theorem", "title"),
+                             "doc": "counterexample certificate (d<=3)"},
+    "bounded_nat": {"fn": _lean_bounded_nat,
+                    "params": ("theorem", "title", "defs", "statement"),
+                    "doc": "exhaustion certificate over a bounded Nat statement"},
+}
+
+
+# -- scene builders (views over the recipe) -----------------------------------
+
+def _p3(v) -> list[float]:
+    a = np.asarray(v, dtype=float).ravel()
+    return a[:3].tolist() if a.size >= 3 else a.tolist()
+
+
+def _scene_simplex(env: dict, params: dict) -> list[dict]:
+    T = np.asarray(env[params["of"]], dtype=float)
+    center_name = params.get("center", "circumcenter")
+    c = np.asarray(env[center_name], dtype=float)
+    w = np.asarray(env[params.get("weights", "barycentric")], dtype=float)
+    inside = bool(w.min() > 0)
+    m, d = T.shape
+    projected = d > 3
+    P = np.array([_p3(row) for row in T])
+    c3 = _p3(c)
+    r = float(np.linalg.norm(T[0] - c))  # true radius, full dimension
+    prims = []
+    if d == 2:
+        prims.append(scene.polygon(T, color="#4a90d9", opacity=0.45))
+    elif d >= 3:
+        faces = [[i, j, k] for i in range(m) for j in range(i + 1, m)
+                 for k in range(j + 1, m)]
+        prims.append(scene.mesh(P.tolist(), faces, color="#4a90d9", opacity=0.25))
+    edges = [(P[i], P[j]) for i in range(m) for j in range(i + 1, m)]
+    prims.append(scene.segments(edges, color="#dfe3e8", width=2.0))
+    if not projected:
+        prims.append(scene.sphere(c3, r, color="#f2c14e", opacity=0.10))
+    prims.append(scene.points(P, color="#ffffff", radius=0.05))
+    prims.append(scene.points([c3], color="#2ecc71" if inside else "#e74c3c",
+                              radius=0.07, name=center_name))
+    label = "circumcenter %s (min barycentric = %.3f)" % (
+        "inside" if inside else "OUTSIDE", float(w.min()))
+    if projected:
+        label += f"  ·  projection ℝ^{d} → ℝ³ — trust the numbers over the picture"
+    prims.append(scene.label(label))
+    return prims
+
+
+def _scene_hull3d(env: dict, params: dict) -> list[dict]:
+    Pts = np.asarray(env[params["of"]], dtype=float)
+    V, E, F = geometry.hull_counts(Pts)
+    verts, faces = geometry.hull_mesh(Pts)
+    edges, seen = [], set()
+    for f in faces:
+        for i in range(3):
+            a, b = sorted((f[i], f[(i + 1) % 3]))
+            if (a, b) not in seen:
+                seen.add((a, b))
+                edges.append((verts[a], verts[b]))
+    return [
+        scene.mesh(verts, faces, color="#4a90d9", opacity=0.25),
+        scene.segments(edges, color="#dfe3e8", width=1.5),
+        scene.points(Pts, color="#ffffff", radius=0.04),
+        scene.label("V=%d  E=%d  F=%d   V-E+F=%d" % (V, E, F, V - E + F)),
+    ]
+
+
+def _scene_gnomon(env: dict, params: dict) -> list[dict]:
+    n = int(env[params["of"]])
+    k = min(max(n, 1), 14)
+    palette = ["#4a90d9", "#f2c14e", "#2ecc71", "#e74c3c", "#9b59b6", "#e67e22", "#1abc9c"]
+    prims = []
+    s = 2.4 / k
+    for layer in range(k):
+        pts = []
+        for i in range(layer + 1):
+            pts.append([i * s, layer * s])
+            if i != layer:
+                pts.append([layer * s, i * s])
+        prims.append(scene.points(pts, color=palette[layer % len(palette)],
+                                  radius=min(0.4 * s, 0.06)))
+    prims.append(scene.label(
+        "n=%d: gnomon layers 1,3,5,... tile the %dx%d square" % (n, k, k)))
+    return prims
+
+
+SCENES = {
+    "simplex": {"fn": _scene_simplex, "params": ("of", "center", "weights"),
+                "doc": "simplex + circumsphere + center; projects when d > 3"},
+    "hull3d": {"fn": _scene_hull3d, "params": ("of",), "doc": "3D convex hull mesh"},
+    "gnomon_square": {"fn": _scene_gnomon, "params": ("of",),
+                      "doc": "picture proof of the odd-number square"},
+}
+
+
+# -- the native engine (CompiledSpec-compatible surface) ----------------------
+
+class NativeEngine:
+    """check/valid/build_scene/certify/lean_certificate over the registries —
+    the exec-free replacement for CompiledSpec."""
+
+    def __init__(self, claim: "Claim"):
+        self.claim = claim
+        self.has_certify = claim.certify is not None
+        self.has_lean_certificate = claim.lean is not None
+
+    def check(self, **vars) -> NativeCheckResult:
+        env = _recipe_env(self.claim.recipe, vars)
+        m = MEASURES[self.claim.measure["kind"]]
+        res = m["fn"](env, self.claim.recipe, self.claim.measure)
+        if res.margin is not None and bool(res.holds) != (res.margin > 0):
+            raise ValueError("measure inconsistency: holds must equal margin > 0")
+        return res
+
+    def valid(self, **vars) -> bool:
+        if self.claim.constraint is None:
+            return True
+        c = CONSTRAINTS[self.claim.constraint["kind"]]
+        return bool(c["fn"]({k: np.asarray(v, dtype=float) for k, v in vars.items()},
+                            self.claim.constraint))
+
+    def build_scene(self, **vars) -> list[dict]:
+        env = _recipe_env(self.claim.recipe, vars)
+        s = SCENES[self.claim.scene["kind"]]
+        return s["fn"](env, self.claim.scene)
+
+    def certify(self, **exact) -> bool:
+        if self.claim.certify is None:
+            raise RuntimeError("claim has no exact certifier")
+        c = CERTIFIERS[self.claim.certify["kind"]]
+        return bool(c["fn"](exact, self.claim.certify))
+
+    def lean_certificate(self, **exact) -> str:
+        if self.claim.lean is None:
+            raise RuntimeError("claim has no lean certificate hook")
+        entry = LEANS[self.claim.lean["kind"]]
+        return entry["fn"](exact, self.claim.lean)
+
+
+@dataclass
+class Claim:
+    id: str
+    title: str
+    conjecture: str
+    latex: str
+    quantifier: str  # "forall" | "exists"
+    spaces: dict[str, Space]
+    # native engine: recipe of constructions + registry selections
+    recipe: list[dict] = field(default_factory=list)
+    measure: dict | None = None       # {"kind": ..., ...params}
+    constraint: dict | None = None
+    certify: dict | None = None
+    lean: dict | None = None
+    scene: dict | None = None
+    lean_statement: str = ""
+    notes: str = ""
+    # legacy engine (adapter): the wrapped spec
+    _spec: object | None = None
+
+    # -- engines -------------------------------------------------------------
+
+    @property
+    def is_native(self) -> bool:
+        return self._spec is None
+
+    def to_speclike(self):
+        """What search/proof machinery consumes. Native claims ARE spec-like;
+        legacy claims defer to their wrapped spec."""
+        return self if self._spec is None else self._spec
+
+    def compiled(self):
+        if self._spec is not None:
+            return self._spec.compiled()
+        if self.measure is None or self.scene is None:
+            raise ValueError(f"claim {self.id!r} has no native measure/scene")
+        return NativeEngine(self)
+
+    # -- spec-like surface (duck-typed VarSpec list) ---------------------------
+
+    @property
+    def domain(self) -> list[FreeVar]:
+        if self._spec is not None:
+            return self._spec.domain
+        out = []
+        for name, space in self.spaces.items():
+            kind = "int" if isinstance(space, IntBox) else "real"
+            out.append(FreeVar(name=name, shape=list(space.shape),
+                               low=float(space.low), high=float(space.high), kind=kind))
+        return out
+
+    @property
+    def max_coord_dim(self) -> int:
+        """Largest trailing dimension across free entities (3 for tetrahedra,
+        4 for the 4-simplex claim, 0 for scalars) — the d>3 honesty trigger."""
+        dims = [s.shape[-1] if s.shape else 0 for s in self.spaces.values()]
+        return max(dims, default=0)
+
+    # -- persistence -----------------------------------------------------------
+
+    def to_json(self) -> dict:
+        if self._spec is not None:
+            return self._spec.to_json()
+        return {
+            "format": CLAIM_FORMAT,
+            "id": self.id, "title": self.title, "conjecture": self.conjecture,
+            "latex": self.latex, "quantifier": self.quantifier,
+            "spaces": [
+                {"name": n, "shape": list(s.shape), "low": s.low, "high": s.high,
+                 "kind": "int" if isinstance(s, IntBox) else "real"}
+                for n, s in self.spaces.items()
+            ],
+            "recipe": self.recipe,
+            "measure": self.measure, "constraint": self.constraint,
+            "certify": self.certify, "lean": self.lean, "scene": self.scene,
+            "lean_statement": self.lean_statement, "notes": self.notes,
+        }
+
+    def save(self, path) -> None:
+        Path(path).write_text(json.dumps(self.to_json(), indent=2))
+
+    @classmethod
+    def from_json(cls, data: dict) -> "Claim":
+        if data.get("format") != CLAIM_FORMAT:
+            raise ValueError(f"not a {CLAIM_FORMAT} document")
+        spaces: dict[str, Space] = {}
+        for s in data["spaces"]:
+            shape = tuple(s["shape"])
+            if s.get("kind") == "int":
+                spaces[s["name"]] = IntBox(shape=shape, low=int(s["low"]), high=int(s["high"]))
+            else:
+                spaces[s["name"]] = Box(shape=shape, low=float(s["low"]), high=float(s["high"]))
+        return cls(
+            id=data["id"], title=data["title"], conjecture=data["conjecture"],
+            latex=data["latex"], quantifier=data["quantifier"], spaces=spaces,
+            recipe=list(data.get("recipe") or []),
+            measure=data.get("measure"), constraint=data.get("constraint"),
+            certify=data.get("certify"), lean=data.get("lean"), scene=data.get("scene"),
+            lean_statement=data.get("lean_statement", ""), notes=data.get("notes", ""),
+        )
+
+    @classmethod
+    def load(cls, path) -> "Claim":
+        return cls.from_json(json.loads(Path(path).read_text()))
+
+
+def claim_from_spec(spec) -> Claim:
+    """Adapter: run any historical ProblemSpec as a Claim (legacy engine)."""
+    return Claim(
+        id=spec.id,
+        title=spec.title,
+        conjecture=spec.conjecture,
+        latex=spec.latex,
+        quantifier=spec.quantifier,
+        spaces=spaces_for(spec),
+        _spec=spec,
+    )
+
+
+# -- validation (the gate for LLM-formalized claims) --------------------------
+
+def validate_claim(claim: Claim, samples: int = 8, seed: int = 0) -> list[str]:
+    """Sandbox-check a native claim: registry keys exist, the recipe resolves,
+    margin/holds are consistent on real samples, the scene renders. Mirrors
+    the historical validate_spec contract — the LLM's output passes this gate
+    or is sent back for repair."""
+    errors: list[str] = []
+    if claim.quantifier not in ("forall", "exists"):
+        errors.append(f"quantifier must be forall/exists, got {claim.quantifier!r}")
+    if not claim.spaces:
+        errors.append("claim needs at least one free entity (a Space)")
+    if claim.measure is None or claim.measure.get("kind") not in MEASURES:
+        errors.append(f"unknown or missing measure: {claim.measure!r}")
+    if claim.scene is None or claim.scene.get("kind") not in SCENES:
+        errors.append(f"unknown or missing scene: {claim.scene!r}")
+    if claim.constraint is not None and claim.constraint.get("kind") not in CONSTRAINTS:
+        errors.append(f"unknown constraint: {claim.constraint!r}")
+    if claim.certify is not None and claim.certify.get("kind") not in CERTIFIERS:
+        errors.append(f"unknown certifier: {claim.certify!r}")
+    if claim.lean is not None and claim.lean.get("kind") not in LEANS:
+        errors.append(f"unknown lean hook: {claim.lean!r}")
+    known = set(claim.spaces)
+    for step in claim.recipe:
+        if step.get("ctor") not in CONSTRUCTORS:
+            errors.append(f"unknown constructor {step.get('ctor')!r}")
+            continue
+        for a in step.get("args", ()):
+            if a not in known:
+                errors.append(f"recipe step {step.get('name')!r}: unknown argument {a!r}")
+        known.add(step.get("name"))
+    if errors:
+        return errors
+
+    engine = claim.compiled()
+    rng = np.random.default_rng(seed)
+    got = 0
+    for _ in range(samples * 25):
+        vars = {n: s.sample(rng) for n, s in claim.spaces.items()}
+        try:
+            if not engine.valid(**vars):
+                continue
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"constraint raised: {type(e).__name__}: {e}")
+            return errors
+        try:
+            res = engine.check(**vars)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"check raised on a valid sample: {type(e).__name__}: {e}")
+            return errors
+        if res.margin is not None and bool(res.holds) != (res.margin > 0):
+            errors.append("margin/holds inconsistency on a sample")
+            return errors
+        if got == 0:
+            try:
+                if not engine.build_scene(**vars):
+                    errors.append("scene builder returned an empty scene")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"scene raised: {type(e).__name__}: {e}")
+        got += 1
+        if got >= samples:
+            break
+    if got == 0:
+        errors.append("could not draw any valid sample (constraint too strict?)")
+    return errors
