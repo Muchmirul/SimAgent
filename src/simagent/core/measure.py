@@ -54,7 +54,7 @@ def qualitative_lines(vars: dict, check: dict) -> list[str]:
     return lines
 
 
-def measure_state(spec, vars: dict, check: dict) -> dict:
+def measure_state(vars: dict, check: dict) -> dict:
     """The agent-facing measurement of the current configuration."""
     return {
         "holds": None if check.get("error") else check.get("holds"),

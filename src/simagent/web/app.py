@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from ..library import all_specs, get
 from ..spec import ProblemSpec
-from ..trace import TRACE_FILE, read_trace
+from ..core.journal import TRACE_FILE, read_trace
 from ..visualize import mpl
 from ..visualize.manim_gen import manim_available, try_render_manim, write_manim_scene
 from .session import SandboxSession

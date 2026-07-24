@@ -135,11 +135,10 @@ def test_run_agent_feeds_thought_and_thinking_to_trace(tmp_path):
 
 
 def test_equation_of_state_discrete_and_degenerate():
-    spec = get("sum-of-odds-square")
-    eq = equation_of_state(spec, {"n": 7}, {"holds": True, "margin": None, "data": {}})
+    eq = equation_of_state({"n": 7}, {"holds": True, "margin": None, "data": {}})
     text = "\n".join(eq["text"])
     assert "n = 7" in text and "discrete check" in text
-    eq2 = equation_of_state(spec, {"n": 7}, {"error": "ZeroDivisionError: boom"})
+    eq2 = equation_of_state({"n": 7}, {"error": "ZeroDivisionError: boom"})
     assert any("degenerate" in l for l in eq2["text"])
 
 

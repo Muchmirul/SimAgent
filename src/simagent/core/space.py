@@ -157,3 +157,17 @@ def from_varspec(v) -> Space:
 def spaces_for(spec) -> dict[str, Space]:
     """All of a spec's free-variable spaces, keyed by name (domain order)."""
     return {v.name: from_varspec(v) for v in spec.domain}
+
+
+def sample_vars(rng: np.random.Generator, spec) -> dict[str, np.ndarray]:
+    """The one authoritative domain sampler (search, play, web, CLI).
+
+    Lives at the input boundary — the only place that knows what sampling
+    means. Keeps the historical per-var error message."""
+    out: dict[str, np.ndarray] = {}
+    for v in spec.domain:
+        try:
+            out[v.name] = from_varspec(v).sample(rng)
+        except ValueError as e:
+            raise ValueError(f"{v.name}: {e}") from None
+    return out

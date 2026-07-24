@@ -16,8 +16,9 @@ import numpy as np
 
 from . import answer as answer_mod
 from . import proof as proof_mod
+from .core.space import sample_vars
 from .search import SearchReport, exhaustible, run_exhaustive, run_search
-from .spec import ProblemSpec, sample_vars, validate_spec
+from .spec import ProblemSpec, validate_spec
 from .visualize import manim_gen, mpl
 
 

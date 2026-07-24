@@ -15,9 +15,9 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from .core.space import SAFE_INT_BOUND, spaces_for
+from .core.space import sample_vars, spaces_for
 from .sandbox import certify as certify_mod
-from .spec import CheckResult, CompiledSpec, ProblemSpec, sample_vars
+from .spec import CheckResult, CompiledSpec, ProblemSpec
 
 
 @dataclass
@@ -111,8 +111,6 @@ def _try_certify(
     return False, None, None, notes
 
 
-# SAFE_INT_BOUND is single-sourced in core.space (the input boundary owns
-# integer-exactness); re-exported above for existing importers.
 EXHAUSTION_CAP = 2_000_000
 
 

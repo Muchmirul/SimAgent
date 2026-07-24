@@ -18,7 +18,7 @@ import numpy as np
 
 from ..core.entity import World
 from ..core.op import apply_op
-from ..core.space import spaces_for
+from ..core.space import sample_vars, spaces_for
 from ..search import (
     SearchReport,
     certify_candidate,
@@ -27,7 +27,7 @@ from ..search import (
     run_exhaustive,
     run_search,
 )
-from ..spec import ProblemSpec, sample_vars
+from ..spec import ProblemSpec
 
 
 _DECISIVE = frozenset(

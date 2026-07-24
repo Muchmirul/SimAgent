@@ -140,21 +140,9 @@ def certify_toolbox() -> dict:
     }
 
 
-def sample_vars(rng: np.random.Generator, spec: "ProblemSpec") -> dict[str, np.ndarray]:
-    """The one authoritative domain sampler (used by search, play, web, CLI).
-
-    Sampling now lives in core.space (the input boundary); this wrapper keeps
-    the single-sampler invariant and the historical per-var error message.
-    """
-    from .core.space import from_varspec
-
-    out: dict[str, np.ndarray] = {}
-    for v in spec.domain:
-        try:
-            out[v.name] = from_varspec(v).sample(rng)
-        except ValueError as e:
-            raise ValueError(f"{v.name}: {e}") from None
-    return out
+# The sampler is single-sourced in core.space (the input boundary); this
+# re-export keeps the legacy surface alive through the compatibility window.
+from .core.space import sample_vars  # noqa: E402, F401
 
 
 def _exec_fn(code: str, fn_name: str, env: dict, where: str) -> Callable:

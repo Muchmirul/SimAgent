@@ -30,7 +30,7 @@ from .llm import DEFAULT_MODEL, resolve_backend
 from .proof import Method
 from .search import SearchReport
 from .spec import ProblemSpec
-from .trace import TraceRecorder
+from .core.journal import Journal
 from .visualize import mpl
 from .web.session import SandboxSession
 
@@ -330,7 +330,7 @@ class AgentRun:
         self._transcript = (self.out / "transcript.jsonl").open("w")
         # The mind trace: thought + act + scene + equation per step, replayable
         # in the web UI's Mind panel (narrative only — proof.json stays boss).
-        self.trace = TraceRecorder(self.out)
+        self.trace = Journal(self.out)
         self.trace.seed(self.session.vars, self.session._check())
         self.views_taken = 0
         self.imaginings = 0
@@ -418,7 +418,6 @@ class AgentRun:
             args=args,
             result=result_text,
             error=is_error,
-            spec=self.spec,
             vars=step_vars,
             check=step_check,
             scene=step_scene,
@@ -475,13 +474,13 @@ class AgentRun:
     def _t_measure(self):
         from .core.measure import measure_state
 
-        state = measure_state(self.spec, self.session.vars, self.session._check())
+        state = measure_state(self.session.vars, self.session._check())
         return json.dumps(state, default=str)[:MAX_TOOL_CHARS]
 
     def _t_view(self, kind: str, var: str | None = None, row: int = 0,
                 xi: int = 0, yi: int = 1, coord: int = 0, resolution: int = 48):
         from . import views as views_mod
-        from .trace import read_trace
+        from .core.journal import read_trace
 
         self.views_taken += 1
         path = self.out / "views" / f"view_{self.views_taken:03d}_{kind}.png"
@@ -513,7 +512,7 @@ class AgentRun:
     def _t_imagine(self, ops: list, look: bool = True):
         """Thought experiment on a fork of the world; mainline untouched."""
         from .core.op import apply_op
-        from .trace import diff_vars
+        from .core.journal import diff_vars
         from . import views as views_mod
 
         if not isinstance(ops, list) or not ops:

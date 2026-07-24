@@ -13,15 +13,13 @@ from __future__ import annotations
 import cmd
 import json
 import re
-from pathlib import Path
 
 import numpy as np
 
-from . import spec as spec_mod
-from .search import certify_candidate, refine_candidate, run_search
 from .spec import ProblemSpec
 from .visualize import mpl
 from .visualize.manim_gen import try_render_manim, write_manim_scene
+from .web.session import SandboxSession
 
 _TARGET_RE = re.compile(r"^([A-Za-z_]\w*)(?:\[(\d+)\])?$")
 
@@ -44,16 +42,17 @@ class PlayShell(cmd.Cmd):
 
     def __init__(self, spec: ProblemSpec, out_dir, stdout=None):
         super().__init__(stdout=stdout)
+        # All state lives in a SandboxSession — the same kernel shell the
+        # agent and the web UI drive, so every mutation flows through core.op.
         self.spec = spec
-        self.comp = spec.compiled()
-        self.out = Path(out_dir)
-        self.out.mkdir(parents=True, exist_ok=True)
-        self.rng = np.random.default_rng(0)
-        self._hunt_seed = 0
-        self.vars: dict[str, np.ndarray] = {}
-        spec.save(self.out / "spec.json")
-        self._sample()
+        self.session = SandboxSession(spec, out_dir)
+        self.comp = self.session.comp
+        self.out = self.session.out
         self._sync(announce=False)
+
+    @property
+    def vars(self) -> dict[str, np.ndarray]:
+        return self.session.vars
 
     # -- infrastructure ------------------------------------------------------
 
@@ -62,19 +61,6 @@ class PlayShell(cmd.Cmd):
 
     def emptyline(self) -> bool:  # don't repeat the last command on Enter
         return False
-
-    def _sample(self, seed: int | None = None) -> None:
-        if seed is not None:
-            self.rng = np.random.default_rng(seed)
-        for _ in range(1000):
-            vars = spec_mod.sample_vars(self.rng, self.spec)
-            try:
-                if self.comp.valid(**vars):
-                    self.vars = vars
-                    return
-            except Exception:  # noqa: BLE001
-                continue
-        raise RuntimeError("could not draw a valid sample (constraint too strict?)")
 
     def _check(self):
         try:
@@ -120,7 +106,8 @@ class PlayShell(cmd.Cmd):
                 self._p(f"{name} has {v.size} entries; got {values.size}")
                 return
             new = values.reshape(v.shape)
-            self.vars[name] = v + new if relative else new
+            target = v + new if relative else new
+            self.session.set_value(name, None, target.reshape(-1).tolist())
         else:
             i = int(idx)
             if i >= v.shape[0]:
@@ -129,7 +116,8 @@ class PlayShell(cmd.Cmd):
             if values.size != np.asarray(v[i]).size:
                 self._p(f"{name}[{i}] needs {np.asarray(v[i]).size} numbers; got {values.size}")
                 return
-            v[i] = v[i] + values if relative else values
+            row = v[i] + values if relative else values
+            self.session.set_value(name, i, np.asarray(row, dtype=float).tolist())
         self._sync()
 
     # -- commands ------------------------------------------------------------
@@ -137,7 +125,7 @@ class PlayShell(cmd.Cmd):
     def do_sample(self, arg: str) -> None:
         """sample [seed] — draw a new random valid configuration."""
         seed = int(arg) if arg.strip() else None
-        self._sample(seed)
+        self.session.sample(seed)
         self._sync()
 
     def do_set(self, arg: str) -> None:
@@ -166,22 +154,20 @@ class PlayShell(cmd.Cmd):
         """refine [steps] — anneal toward a counterexample (forall) / witness (exists)."""
         steps = int(arg) if arg.strip() else 300
         try:
-            vars, res, used = refine_candidate(self.spec, self.vars, steps=steps)
+            result = self.session.refine(steps)
         except ValueError as e:
             self._p(str(e))
             return
-        self.vars = vars
-        self._p(f"  refined for {used} steps (stays inside the declared domain)")
+        self._p(f"  refined for {result['steps']} steps (stays inside the declared domain)")
         self._sync()
 
     def do_hunt(self, arg: str) -> None:
         """hunt [trials] — automated search; loads the witness it finds."""
         trials = int(arg) if arg.strip() else 800
-        self._hunt_seed += 1
-        report = run_search(self.spec, trials=trials, seed=self._hunt_seed)
-        self._p(f"  verdict: {report.verdict}" + (f" (certified={report.certified})" if report.certified is not None else ""))
-        if report.witness:
-            self.vars = {k: np.array(v, dtype=float) for k, v in report.witness.items()}
+        result = self.session.hunt(trials)
+        certified = result["certified"]
+        self._p(f"  verdict: {result['verdict']}" + (f" (certified={certified})" if certified is not None else ""))
+        if result["loaded_witness"]:
             self._p("  witness loaded into the current configuration")
             self._sync()
         else:
@@ -190,15 +176,18 @@ class PlayShell(cmd.Cmd):
     def do_certify(self, arg: str) -> None:
         """certify — exact-arithmetic verdict for the current configuration."""
         try:
-            res, certified, exact, notes = certify_candidate(self.spec, self.vars)
+            result = self.session.certify()
         except ValueError as e:
             self._p(str(e))
             return
-        self._p(f"numeric: holds={res.holds}")
+        holds, certified, exact, notes = (
+            result["holds"], result["certified"], result["exact"], result["notes"]
+        )
+        self._p(f"numeric: holds={holds}")
         if certified is None:
             self._p("no exact certifier on this spec — numeric only")
         elif certified:
-            what = "property FAILS" if not res.holds else "property HOLDS"
+            what = "property FAILS" if not holds else "property HOLDS"
             self._p(f"CERTIFIED in exact rationals: {what} for this configuration")
             for name, mat in (exact or {}).items():
                 self._p(f"  {name} =")

@@ -73,7 +73,7 @@ def _latex_matrix(arr: np.ndarray) -> str:
     return r"\begin{pmatrix} " + r" \\ ".join(rows) + r" \end{pmatrix}"
 
 
-def equation_of_state(spec, vars: dict, check: dict) -> dict:
+def equation_of_state(vars: dict, check: dict) -> dict:
     """Translate the current sandbox state into equations (text + LaTeX).
 
     This is the "equation as translation" layer: the model thinks in the
@@ -177,7 +177,6 @@ class Journal:
         args: dict,
         result: str,
         error: bool,
-        spec,
         vars: dict,
         check: dict,
         scene: list[dict],
@@ -206,7 +205,7 @@ class Journal:
             "check": check,
             "vars": {k: np.asarray(v).tolist() for k, v in vars.items()},
             "scene": scene,
-            "equation": equation_of_state(spec, vars, check),
+            "equation": equation_of_state(vars, check),
             "diff": {
                 "changed": diff_vars(self._prev_vars, vars),
                 "margin": {"before": self._prev_margin, "after": margin},

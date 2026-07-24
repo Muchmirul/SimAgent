@@ -11,13 +11,9 @@ from simagent.library import get
 from simagent.search import run_search
 
 
-class FakeSpec:
-    id = "fake"
-
-
 def entry(j, tool, vars, margin, **kw):
     return j.record(
-        tool=tool, args={}, result="ok", error=False, spec=FakeSpec(),
+        tool=tool, args={}, result="ok", error=False,
         vars=vars, check={"holds": margin > 0, "margin": margin, "data": {}},
         scene=[], **kw,
     )
